@@ -5,7 +5,7 @@ import disnake
 from disnake.ext import commands
 from flask import Flask
 
-# ── Flask keep-alive (evita que Render apague el servicio) ───────────────────
+# ── Flask keep-alive ─────────────────────────────────────────────────────────
 app = Flask(__name__)
 
 @app.route("/")
@@ -23,7 +23,6 @@ def keep_alive():
 # ── Configuración ────────────────────────────────────────────────────────────
 DISCORD_TOKEN = os.environ["DISCORD_TOKEN"]
 OMDB_API_KEY  = os.environ["OMDB_API_KEY"]
-CANAL_PEDIDOS = int(os.environ.get("CANAL_PEDIDOS_ID", "0"))
 
 OMDB_BASE     = "http://www.omdbapi.com/"
 
@@ -34,7 +33,6 @@ bot = commands.InteractionBot(intents=intents)
 
 # ── Helpers OMDb ─────────────────────────────────────────────────────────────
 async def buscar_omdb(query: str) -> list[dict]:
-    """Busca títulos en OMDb con s= y devuelve hasta 10 resultados."""
     params = {"apikey": OMDB_API_KEY, "s": query}
     async with aiohttp.ClientSession() as session:
         try:
@@ -54,7 +52,6 @@ async def buscar_omdb(query: str) -> list[dict]:
 
 
 async def detalle_omdb(imdb_id: str) -> dict | None:
-    """Obtiene los detalles completos de un título por su imdbID."""
     params = {"apikey": OMDB_API_KEY, "i": imdb_id, "plot": "short"}
     async with aiohttp.ClientSession() as session:
         try:
@@ -87,12 +84,11 @@ async def autocompletar_titulo(
 
     resultados = await buscar_omdb(input_usuario)
     opciones = []
-
     for item in resultados:
-        titulo  = item.get("Title", "Sin título")
-        año     = item.get("Year", "????")
-        imdb_id = item.get("imdbID", "")
-        emoji   = tipo_emoji(item.get("Type", ""))
+        titulo   = item.get("Title", "Sin título")
+        año      = item.get("Year", "????")
+        imdb_id  = item.get("imdbID", "")
+        emoji    = tipo_emoji(item.get("Type", ""))
         etiqueta = f"{emoji} {titulo} ({año})"[:100]
         opciones.append(disnake.OptionChoice(name=etiqueta, value=imdb_id))
 
@@ -111,15 +107,14 @@ async def pedir(
         autocomplete=autocompletar_titulo,
     ),
 ):
-    await inter.response.defer(ephemeral=True)
+    await inter.response.defer()  # Visible para todos en el canal
 
     imdb_id = titulo
     detalle = await detalle_omdb(imdb_id)
 
     if not detalle:
         await inter.followup.send(
-            "❌ No pude obtener los detalles del título. Intenta de nuevo.",
-            ephemeral=True,
+            "❌ No pude obtener los detalles del título. Intenta de nuevo."
         )
         return
 
@@ -147,33 +142,17 @@ async def pedir(
     if poster and poster != "N/A":
         embed.set_thumbnail(url=poster)
 
-    canal = bot.get_channel(CANAL_PEDIDOS)
-    if canal is None:
-        try:
-            canal = await bot.fetch_channel(CANAL_PEDIDOS)
-        except Exception:
-            await inter.followup.send(
-                "❌ No encontré el canal de pedidos. "
-                "Revisa `CANAL_PEDIDOS_ID` en las variables de entorno.",
-                ephemeral=True,
-            )
-            return
-
-    await canal.send(embed=embed)
-    await inter.followup.send(
-        f"✅ Tu pedido de **{nombre} ({año})** fue enviado correctamente.",
-        ephemeral=True,
-    )
+    # Envía el embed en el mismo canal donde se usó el comando
+    await inter.followup.send(embed=embed)
 
 
 # ── Eventos ───────────────────────────────────────────────────────────────────
 @bot.event
 async def on_ready():
     print(f"✅ Bot conectado como {bot.user} (ID: {bot.user.id})")
-    print(f"📡 Canal de pedidos: {CANAL_PEDIDOS}")
 
 
 # ── Inicio ────────────────────────────────────────────────────────────────────
 if __name__ == "__main__":
-    keep_alive()   # Arranca Flask en segundo plano
+    keep_alive()
     bot.run(DISCORD_TOKEN)
