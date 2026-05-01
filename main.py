@@ -38,27 +38,38 @@ bot = commands.InteractionBot(intents=intents)
 
 # ── Helpers TMDB ─────────────────────────────────────────────────────────────
 async def buscar_tmdb(query: str) -> list[dict]:
-    """Busca películas y series en TMDB con /search/multi en es-MX."""
-    params = {"query": query, "language": TMDB_LANGUAGE, "page": 1}
+    """
+    Busca en /search/movie y /search/tv por separado,
+    mezcla los resultados y los ordena por popularidad descendente.
+    """
+    params_base = {
+        "query":         query,
+        "language":      TMDB_LANGUAGE,
+        "page":          1,
+        "include_adult": "false",
+    }
+    resultados = []
     async with aiohttp.ClientSession() as session:
-        try:
-            async with session.get(
-                f"{TMDB_BASE}/search/multi",
-                headers=TMDB_HEADERS,
-                params=params,
-                timeout=aiohttp.ClientTimeout(total=5),
-            ) as resp:
-                if resp.status != 200:
-                    return []
-                data = await resp.json()
-                # Filtramos solo movies y series (descartamos personas)
-                resultados = [
-                    r for r in data.get("results", [])
-                    if r.get("media_type") in ("movie", "tv")
-                ]
-                return resultados[:10]
-        except Exception:
-            return []
+        for media_type in ("movie", "tv"):
+            try:
+                async with session.get(
+                    f"{TMDB_BASE}/search/{media_type}",
+                    headers=TMDB_HEADERS,
+                    params=params_base,
+                    timeout=aiohttp.ClientTimeout(total=5),
+                ) as resp:
+                    if resp.status != 200:
+                        continue
+                    data = await resp.json()
+                    for item in data.get("results", [])[:10]:
+                        item["media_type"] = media_type
+                        resultados.append(item)
+            except Exception:
+                continue
+
+    # Ordenar por popularidad y devolver los 25 mejores (límite de Discord)
+    resultados.sort(key=lambda x: x.get("popularity", 0), reverse=True)
+    return resultados[:25]
 
 
 async def detalle_tmdb(tmdb_id: int, media_type: str) -> dict | None:
@@ -105,11 +116,8 @@ async def autocompletar_titulo(
         tmdb_id    = item.get("id", 0)
         emoji      = tipo_emoji(media_type)
 
-        # Etiqueta visible en Discord (máx. 100 chars)
         etiqueta = f"{emoji} {titulo} ({año})"[:100]
-
-        # Valor interno: "tmdb_id|media_type" para recuperarlo en el comando
-        valor = f"{tmdb_id}|{media_type}"
+        valor    = f"{tmdb_id}|{media_type}"
 
         opciones.append(disnake.OptionChoice(name=etiqueta, value=valor))
 
@@ -128,10 +136,8 @@ async def pedir(
         autocomplete=autocompletar_titulo,
     ),
 ):
-    # Respuesta inmediata para evitar el error "La aplicación no respondió"
     await inter.response.send_message("✅ ¡Pedido enviado!", ephemeral=True)
 
-    # Decodificamos el valor "tmdb_id|media_type"
     try:
         tmdb_id_str, media_type = titulo.split("|")
         tmdb_id = int(tmdb_id_str)
@@ -149,20 +155,18 @@ async def pedir(
         )
         return
 
-    # ── Datos del título ──────────────────────────────────────────────────────
-    nombre    = detalle.get("title") or detalle.get("name") or "Desconocido"
-    año       = extraer_año(detalle, media_type)
-    generos   = ", ".join(g["name"] for g in detalle.get("genres", [])) or "N/A"
+    nombre     = detalle.get("title") or detalle.get("name") or "Desconocido"
+    año        = extraer_año(detalle, media_type)
+    generos    = ", ".join(g["name"] for g in detalle.get("genres", [])) or "N/A"
     puntuacion = detalle.get("vote_average", 0)
-    votos     = detalle.get("vote_count", 0)
-    sinopsis  = detalle.get("overview") or "Sin sinopsis disponible."
-    poster    = detalle.get("poster_path")
-    emoji     = tipo_emoji(media_type)
+    votos      = detalle.get("vote_count", 0)
+    sinopsis   = detalle.get("overview") or "Sin sinopsis disponible."
+    poster     = detalle.get("poster_path")
+    emoji      = tipo_emoji(media_type)
 
-    tmdb_url  = f"https://www.themoviedb.org/{media_type}/{tmdb_id}"
+    tmdb_url   = f"https://www.themoviedb.org/{media_type}/{tmdb_id}"
     poster_url = f"https://image.tmdb.org/t/p/w500{poster}" if poster else None
 
-    # ── Embed ────────────────────────────────────────────────────────────────
     embed = disnake.Embed(
         title=f"{emoji} {nombre} ({año})",
         url=tmdb_url,
