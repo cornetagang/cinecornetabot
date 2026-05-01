@@ -31,37 +31,46 @@ TMDB_LANGUAGE  = "es-MX"
 intents = disnake.Intents.default()
 bot = commands.InteractionBot(intents=intents)
 
-# ── Helpers TMDB (Optimizado: Sin Headers, solo Params) ──────────────────────
-async def buscar_tmdb(query: str) -> list[dict]:
-    params = {
-        "api_key":       TMDB_API_KEY,  # Solución: pasar API Key aquí
-        "query":         query,
-        "language":      TMDB_LANGUAGE,
-        "include_adult": "false",
-    }
-    resultados = []
-    # Usamos un timeout corto (2s) para no hacer esperar a Discord
-    async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=2)) as session:
-        for media_type in ("movie", "tv"):
-            try:
-                async with session.get(f"{TMDB_BASE}/search/{media_type}", params=params) as resp:
-                    if resp.status == 200:
-                        data = await resp.json()
-                        for item in data.get("results", [])[:10]:
-                            item["media_type"] = media_type
-                            resultados.append(item)
-            except: continue
+# ── Helpers TMDB (Optimizado para Autocompletado) ────────────────────────────
+async def buscar_tmdb(busqueda: str) -> list[disnake.OptionChoice]:
+    opciones = []
+    
+    # URL de Búsqueda: directa, usando search/multi para buscar películas y series a la vez
+    url = f"https://api.themoviedb.org/3/search/multi?api_key={TMDB_API_KEY}&language=es-MX&query={busqueda}&include_adult=false"
+    
+    try:
+        # Timeout corto para no hacer esperar a Discord
+        async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=2)) as session:
+            async with session.get(url) as resp:
+                if resp.status == 200:
+                    data = await resp.json()
+                    
+                    # Filtrar solo películas y series (el endpoint multi también devuelve personas)
+                    resultados = [item for item in data.get("results", []) if item.get("media_type") in ("movie", "tv")]
+                    
+                    # Ordenar por popularidad y limitar a 25 (límite máximo de Discord)
+                    resultados.sort(key=lambda x: x.get("popularity", 0), reverse=True)
+                    resultados = resultados[:25]
+                    
+                    for item in resultados:
+                        media_type = item.get("media_type")
+                        titulo = item.get("title") or item.get("name") or "Sin título"
+                        año = extraer_año(item, media_type)
+                        emoji = "🎬" if media_type == "movie" else "📺"
+                        
+                        etiqueta = f"{emoji} {titulo} ({año})"[:100] # Max 100 caracteres para Discord
+                        valor = f"{item['id']}|{media_type}"
+                        
+                        # Formato de salida: disnake.OptionChoice
+                        opciones.append(disnake.OptionChoice(name=etiqueta, value=valor))
+                else:
+                    print(f"Error en búsqueda: La API de TMDB respondió con código {resp.status}")
+                    
+    except Exception as e:
+        # Manejo de Errores: Para ver exactamente qué falla en la consola de Render
+        print(f"Error en búsqueda: {e}")
 
-    resultados.sort(key=lambda x: x.get("popularity", 0), reverse=True)
-    return resultados[:25]
-
-async def detalle_tmdb(tmdb_id: int, media_type: str) -> dict | None:
-    params = {"api_key": TMDB_API_KEY, "language": TMDB_LANGUAGE}
-    async with aiohttp.ClientSession() as session:
-        try:
-            async with session.get(f"{TMDB_BASE}/{media_type}/{tmdb_id}", params=params) as resp:
-                return await resp.json() if resp.status == 200 else None
-        except: return None
+    return opciones
 
 def extraer_año(item: dict, media_type: str) -> str:
     fecha = item.get("release_date" if media_type == "movie" else "first_air_date", "")
@@ -72,31 +81,19 @@ def extraer_año(item: dict, media_type: str) -> str:
 async def on_application_command_autocomplete(inter: disnake.ApplicationCommandInteraction):
     if inter.data.name != "pedir": return
     
-    input_usuario = inter.filled_options.get("titulo", "")
-    if len(input_usuario) < 3:
+    busqueda = inter.filled_options.get("titulo", "")
+    
+    # Respuesta rápida: menos de 3 letras no busca nada
+    if len(busqueda) < 3:
         await inter.response.autocomplete([])
         return
 
-    try:
-        resultados = await buscar_tmdb(input_usuario)
-        opciones = []
-        for item in resultados:
-            media_type = item.get("media_type", "movie")
-            titulo = item.get("title") or item.get("name") or "Sin título"
-            año = extraer_año(item, media_type)
-            emoji = "🎬" if media_type == "movie" else "📺"
-            
-            etiqueta = f"{emoji} {titulo} ({año})"[:100]
-            valor = f"{item['id']}|{media_type}"
-            opciones.append(disnake.OptionChoice(name=etiqueta, value=valor))
-        
-        # Respuesta única y directa
-        await inter.response.autocomplete(opciones)
-    except:
-        await inter.response.autocomplete([])
+    # Llamamos a nuestra función que ya devuelve las opciones formateadas
+    opciones = await buscar_tmdb(busqueda)
+    await inter.response.autocomplete(opciones)
 
 # ── Comando /pedir ────────────────────────────────────────────────────────────
-@bot.slash_command(name="buscarpeli", description="Pide una película o serie.")
+@bot.slash_command(name="pedir", description="Pide una película o serie.")
 async def pedir(
     inter: disnake.ApplicationCommandInteraction,
     titulo: str = commands.Param(description="Nombre de la película o serie")
