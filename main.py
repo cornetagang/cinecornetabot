@@ -4,6 +4,7 @@ import aiohttp
 import disnake
 from disnake.ext import commands
 from flask import Flask
+from deep_translator import GoogleTranslator
 
 # ── Flask keep-alive ─────────────────────────────────────────────────────────
 app = Flask(__name__)
@@ -29,6 +30,15 @@ OMDB_BASE     = "http://www.omdbapi.com/"
 # ── Bot ──────────────────────────────────────────────────────────────────────
 intents = disnake.Intents.default()
 bot = commands.InteractionBot(intents=intents)
+
+
+# ── Traducción ────────────────────────────────────────────────────────────────
+def traducir_a_ingles(texto: str) -> str:
+    """Traduce el texto de español a inglés. Si falla, devuelve el original."""
+    try:
+        return GoogleTranslator(source="es", target="en").translate(texto)
+    except Exception:
+        return texto
 
 
 # ── Helpers OMDb ─────────────────────────────────────────────────────────────
@@ -82,7 +92,10 @@ async def autocompletar_titulo(
     if len(input_usuario) < 2:
         return []
 
-    resultados = await buscar_omdb(input_usuario)
+    # Traducir antes de buscar en OMDb
+    query_en = traducir_a_ingles(input_usuario)
+
+    resultados = await buscar_omdb(query_en)
     opciones = []
     for item in resultados:
         titulo   = item.get("Title", "Sin título")
@@ -110,6 +123,7 @@ async def pedir(
     # Respuesta inmediata para evitar el error "La aplicación no respondió"
     await inter.response.send_message("✅ ¡Pedido enviado!", ephemeral=True)
 
+    # `titulo` ya es el imdbID elegido desde el autocompletado
     imdb_id = titulo
     detalle = await detalle_omdb(imdb_id)
 
@@ -134,17 +148,16 @@ async def pedir(
         description=sinopsis,
         color=0x00d4ff,
     )
-    embed.add_field(name="📅 Año",      value=año,     inline=True)
-    embed.add_field(name="🎭 Género",   value=genero,  inline=True)
-    embed.add_field(name="🆔 IMDB ID",  value=imdb_id, inline=True)
+    embed.add_field(name="📅 Año",     value=año,     inline=True)
+    embed.add_field(name="🎭 Género",  value=genero,  inline=True)
+    embed.add_field(name="🆔 IMDB ID", value=imdb_id, inline=True)
     embed.set_footer(
         text=f"Pedido por {inter.author} • {inter.guild.name if inter.guild else 'DM'}",
         icon_url=inter.author.display_avatar.url,
     )
     if poster and poster != "N/A":
-        embed.set_image(url=poster)  # Póster grande en lugar de miniatura
+        embed.set_image(url=poster)
 
-    # Mensaje al canal mencionando al usuario + embed
     await inter.channel.send(
         content=f"🔔 **{inter.author.mention} ha pedido:**",
         embed=embed,
