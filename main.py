@@ -169,7 +169,7 @@ async def pedir(
     # El content aparece en la notificación móvil → incluimos el título aquí
     tipo = "🎬" if media_type == "movie" else "📺"
     await inter.channel.send(
-        content=f"🗣️ {inter.author.mention} ha pedido: {tipo} **{nombre} ({año})**",
+        content=f"🗣️ {inter.author.mention} ha pedido: {tipo} {nombre} ({año})",
         embed=embed
     )
 
