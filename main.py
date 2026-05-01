@@ -1,14 +1,31 @@
 import os
+import threading
 import aiohttp
 import disnake
 from disnake.ext import commands
+from flask import Flask
+
+# ── Flask keep-alive (evita que Render apague el servicio) ───────────────────
+app = Flask(__name__)
+
+@app.route("/")
+def index():
+    return "Bot Online", 200
+
+def run_flask():
+    port = int(os.environ.get("PORT", 10000))
+    app.run(host="0.0.0.0", port=port)
+
+def keep_alive():
+    t = threading.Thread(target=run_flask, daemon=True)
+    t.start()
 
 # ── Configuración ────────────────────────────────────────────────────────────
-DISCORD_TOKEN  = os.environ["DISCORD_TOKEN"]
-OMDB_API_KEY   = os.environ["OMDB_API_KEY"]
-CANAL_PEDIDOS  = int(os.environ.get("CANAL_PEDIDOS_ID", "0"))
+DISCORD_TOKEN = os.environ["DISCORD_TOKEN"]
+OMDB_API_KEY  = os.environ["OMDB_API_KEY"]
+CANAL_PEDIDOS = int(os.environ.get("CANAL_PEDIDOS_ID", "0"))
 
-OMDB_BASE      = "http://www.omdbapi.com/"
+OMDB_BASE     = "http://www.omdbapi.com/"
 
 # ── Bot ──────────────────────────────────────────────────────────────────────
 intents = disnake.Intents.default()
@@ -55,7 +72,6 @@ async def detalle_omdb(imdb_id: str) -> dict | None:
 
 
 def tipo_emoji(tipo: str) -> str:
-    """Emoji según el tipo de contenido de OMDb."""
     return {"movie": "🎬", "series": "📺", "episode": "📎"}.get(
         tipo.lower(), "🎞️"
     )
@@ -77,11 +93,7 @@ async def autocompletar_titulo(
         año     = item.get("Year", "????")
         imdb_id = item.get("imdbID", "")
         emoji   = tipo_emoji(item.get("Type", ""))
-
-        # Etiqueta visible en Discord (máx. 100 chars)
         etiqueta = f"{emoji} {titulo} ({año})"[:100]
-
-        # Valor interno = imdbID, que recibirá el comando al ejecutarse
         opciones.append(disnake.OptionChoice(name=etiqueta, value=imdb_id))
 
     return opciones
@@ -101,7 +113,6 @@ async def pedir(
 ):
     await inter.response.defer(ephemeral=True)
 
-    # `titulo` contiene el imdbID elegido desde el autocompletado
     imdb_id = titulo
     detalle = await detalle_omdb(imdb_id)
 
@@ -120,7 +131,6 @@ async def pedir(
     poster   = detalle.get("Poster", "N/A")
     emoji    = tipo_emoji(tipo)
 
-    # ── Embed ────────────────────────────────────────────────────────────────
     embed = disnake.Embed(
         title=f"{emoji} {nombre} ({año})",
         url=f"https://www.imdb.com/title/{imdb_id}/",
@@ -131,16 +141,12 @@ async def pedir(
     embed.add_field(name="🎭 Género",  value=genero,  inline=True)
     embed.add_field(name="🔑 IMDB ID", value=imdb_id, inline=True)
     embed.set_footer(
-        text=(
-            f"Pedido por {inter.author}"
-            f" • {inter.guild.name if inter.guild else 'DM'}"
-        ),
+        text=f"Pedido por {inter.author} • {inter.guild.name if inter.guild else 'DM'}",
         icon_url=inter.author.display_avatar.url,
     )
     if poster and poster != "N/A":
         embed.set_thumbnail(url=poster)
 
-    # ── Envío al canal de pedidos ─────────────────────────────────────────────
     canal = bot.get_channel(CANAL_PEDIDOS)
     if canal is None:
         try:
@@ -164,9 +170,10 @@ async def pedir(
 @bot.event
 async def on_ready():
     print(f"✅ Bot conectado como {bot.user} (ID: {bot.user.id})")
-    print(f"📡 Canal de pedidos configurado: {CANAL_PEDIDOS}")
+    print(f"📡 Canal de pedidos: {CANAL_PEDIDOS}")
 
 
 # ── Inicio ────────────────────────────────────────────────────────────────────
 if __name__ == "__main__":
+    keep_alive()   # Arranca Flask en segundo plano
     bot.run(DISCORD_TOKEN)
