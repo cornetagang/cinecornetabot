@@ -111,7 +111,7 @@ async def autocompletar_titulo(
 # ── Comando /pedir ────────────────────────────────────────────────────────────
 @bot.slash_command(
     name="pedir",
-    description="Pide una película o serie para que sea añadida al servidor.",
+    description="Pide una película o serie de forma más específica.",
 )
 async def pedir(
     inter: disnake.ApplicationCommandInteraction,
@@ -159,7 +159,7 @@ async def pedir(
         embed.set_image(url=poster)
 
     await inter.channel.send(
-        content=f"🔔 **{inter.author.mention} ha pedido:**",
+        content=f"🗣️ **{inter.author.mention} ha pedido:**",
         embed=embed,
     )
 
