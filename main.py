@@ -10,7 +10,7 @@ app = Flask(__name__)
 
 @app.route("/")
 def index():
-    return "Bot Online", 200
+    return "OK", 200
 
 def run_flask():
     port = int(os.environ.get("PORT", 10000))
@@ -98,7 +98,7 @@ async def autocompletar_titulo(
 # ── Comando /pedir ────────────────────────────────────────────────────────────
 @bot.slash_command(
     name="pedir",
-    description="Pide una película o serie para que sea añadida al servidor.",
+    description="Pide una película o serie de forma mas específica.",
 )
 async def pedir(
     inter: disnake.ApplicationCommandInteraction,
@@ -142,8 +142,9 @@ async def pedir(
     if poster and poster != "N/A":
         embed.set_image(url=poster)
 
+    # El content sin markdown se ve limpio en notificaciones móviles
     await inter.channel.send(
-        content=f"🗣️ **{inter.author.mention} ha pedido:**",
+        content=f"🗣️ {inter.author.mention} ha pedido: {emoji} {nombre} ({año})",
         embed=embed,
     )
 
