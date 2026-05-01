@@ -5,7 +5,7 @@ import disnake
 from disnake.ext import commands
 from flask import Flask
 
-# ── Flask keep-alive ─────────────────────────────────────────────────────────
+# ── Flask keep-alive (Simplificado para evitar errores de Cron-job) ──────────
 app = Flask(__name__)
 
 @app.route("/")
@@ -22,180 +22,121 @@ def keep_alive():
 
 # ── Configuración ────────────────────────────────────────────────────────────
 DISCORD_TOKEN  = os.environ["DISCORD_TOKEN"]
-TMDB_API_KEY   = os.environ["TMDB_API_KEY"]
+TMDB_API_KEY   = os.environ["TMDB_API_KEY"]  # Usaremos la llave corta (4f325...)
 
 TMDB_BASE      = "https://api.themoviedb.org/3"
 TMDB_LANGUAGE  = "es-MX"
-TMDB_HEADERS   = {
-    "Authorization": f"Bearer {TMDB_API_KEY}",
-    "accept": "application/json",
-}
 
 # ── Bot ──────────────────────────────────────────────────────────────────────
 intents = disnake.Intents.default()
 bot = commands.InteractionBot(intents=intents)
 
-
-# ── Helpers TMDB ─────────────────────────────────────────────────────────────
+# ── Helpers TMDB (Optimizado: Sin Headers, solo Params) ──────────────────────
 async def buscar_tmdb(query: str) -> list[dict]:
-    """
-    Busca en /search/movie y /search/tv por separado,
-    mezcla los resultados y los ordena por popularidad descendente.
-    """
-    params_base = {
+    params = {
+        "api_key":       TMDB_API_KEY,  # Solución: pasar API Key aquí
         "query":         query,
         "language":      TMDB_LANGUAGE,
-        "page":          1,
         "include_adult": "false",
     }
     resultados = []
-    async with aiohttp.ClientSession() as session:
+    # Usamos un timeout corto (2s) para no hacer esperar a Discord
+    async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=2)) as session:
         for media_type in ("movie", "tv"):
             try:
-                async with session.get(
-                    f"{TMDB_BASE}/search/{media_type}",
-                    headers=TMDB_HEADERS,
-                    params=params_base,
-                    timeout=aiohttp.ClientTimeout(total=5),
-                ) as resp:
-                    if resp.status != 200:
-                        continue
-                    data = await resp.json()
-                    for item in data.get("results", [])[:10]:
-                        item["media_type"] = media_type
-                        resultados.append(item)
-            except Exception:
-                continue
+                async with session.get(f"{TMDB_BASE}/search/{media_type}", params=params) as resp:
+                    if resp.status == 200:
+                        data = await resp.json()
+                        for item in data.get("results", [])[:10]:
+                            item["media_type"] = media_type
+                            resultados.append(item)
+            except: continue
 
-    # Ordenar por popularidad y devolver los 25 mejores (límite de Discord)
     resultados.sort(key=lambda x: x.get("popularity", 0), reverse=True)
     return resultados[:25]
 
-
 async def detalle_tmdb(tmdb_id: int, media_type: str) -> dict | None:
-    """Obtiene detalles completos de una película o serie por su ID."""
-    params = {"language": TMDB_LANGUAGE}
+    params = {"api_key": TMDB_API_KEY, "language": TMDB_LANGUAGE}
     async with aiohttp.ClientSession() as session:
         try:
-            async with session.get(
-                f"{TMDB_BASE}/{media_type}/{tmdb_id}",
-                headers=TMDB_HEADERS,
-                params=params,
-                timeout=aiohttp.ClientTimeout(total=5),
-            ) as resp:
-                if resp.status != 200:
-                    return None
-                return await resp.json()
-        except Exception:
-            return None
-
-
-def tipo_emoji(media_type: str) -> str:
-    return {"movie": "🎬", "tv": "📺"}.get(media_type, "🎞️")
-
+            async with session.get(f"{TMDB_BASE}/{media_type}/{tmdb_id}", params=params) as resp:
+                return await resp.json() if resp.status == 200 else None
+        except: return None
 
 def extraer_año(item: dict, media_type: str) -> str:
     fecha = item.get("release_date" if media_type == "movie" else "first_air_date", "")
     return fecha[:4] if fecha else "????"
 
-
-# ── Autocompletado ────────────────────────────────────────────────────────────
-async def autocompletar_titulo(
-    inter: disnake.ApplicationCommandInteraction,
-    input_usuario: str,
-) -> list[disnake.OptionChoice]:
-    if len(input_usuario) < 2:
-        return []
-
-    resultados = await buscar_tmdb(input_usuario)
-    opciones = []
-    for item in resultados:
-        media_type = item.get("media_type", "movie")
-        titulo     = item.get("title") or item.get("name") or "Sin título"
-        año        = extraer_año(item, media_type)
-        tmdb_id    = item.get("id", 0)
-        emoji      = tipo_emoji(media_type)
-
-        etiqueta = f"{emoji} {titulo} ({año})"[:100]
-        valor    = f"{tmdb_id}|{media_type}"
-
-        opciones.append(disnake.OptionChoice(name=etiqueta, value=valor))
-
-    return opciones
-
-
-# ── Comando /pedir ────────────────────────────────────────────────────────────
-@bot.slash_command(
-    name="pedir",
-    description="Pide una película o serie para que sea añadida al servidor.",
-)
-async def pedir(
-    inter: disnake.ApplicationCommandInteraction,
-    titulo: str = commands.Param(
-        description="Escribe el nombre de la película o serie.",
-        autocomplete=autocompletar_titulo,
-    ),
-):
-    await inter.response.send_message("✅ ¡Pedido enviado!", ephemeral=True)
+# ── Autocompletado (Optimizado para evitar el error 40060) ───────────────────
+@bot.event
+async def on_application_command_autocomplete(inter: disnake.ApplicationCommandInteraction):
+    if inter.data.name != "pedir": return
+    
+    input_usuario = inter.filled_options.get("titulo", "")
+    if len(input_usuario) < 3:
+        await inter.response.autocomplete([])
+        return
 
     try:
-        tmdb_id_str, media_type = titulo.split("|")
-        tmdb_id = int(tmdb_id_str)
-    except ValueError:
-        await inter.channel.send(
-            f"{inter.author.mention} ❌ Selecciona una opción válida del autocompletado."
-        )
+        resultados = await buscar_tmdb(input_usuario)
+        opciones = []
+        for item in resultados:
+            media_type = item.get("media_type", "movie")
+            titulo = item.get("title") or item.get("name") or "Sin título"
+            año = extraer_año(item, media_type)
+            emoji = "🎬" if media_type == "movie" else "📺"
+            
+            etiqueta = f"{emoji} {titulo} ({año})"[:100]
+            valor = f"{item['id']}|{media_type}"
+            opciones.append(disnake.OptionChoice(name=etiqueta, value=valor))
+        
+        # Respuesta única y directa
+        await inter.response.autocomplete(opciones)
+    except:
+        await inter.response.autocomplete([])
+
+# ── Comando /pedir ────────────────────────────────────────────────────────────
+@bot.slash_command(name="pedir", description="Pide una película o serie.")
+async def pedir(
+    inter: disnake.ApplicationCommandInteraction,
+    titulo: str = commands.Param(description="Nombre de la película o serie")
+):
+    # Respuesta inmediata para evitar el "La aplicación no respondió"
+    await inter.response.send_message("✅ ¡Procesando tu pedido!", ephemeral=True)
+
+    try:
+        tmdb_id, media_type = titulo.split("|")
+        detalle = await detalle_tmdb(int(tmdb_id), media_type)
+        if not detalle: raise Exception()
+    except:
+        await inter.channel.send(f"{inter.author.mention} ❌ Error al obtener detalles. Selecciona una opción de la lista.")
         return
 
-    detalle = await detalle_tmdb(tmdb_id, media_type)
-
-    if not detalle:
-        await inter.channel.send(
-            f"{inter.author.mention} ❌ No pude obtener los detalles del título. Intenta de nuevo."
-        )
-        return
-
-    nombre     = detalle.get("title") or detalle.get("name") or "Desconocido"
-    año        = extraer_año(detalle, media_type)
-    generos    = ", ".join(g["name"] for g in detalle.get("genres", [])) or "N/A"
+    nombre = detalle.get("title") or detalle.get("name")
+    año = extraer_año(detalle, media_type)
+    generos = ", ".join(g["name"] for g in detalle.get("genres", []))
     puntuacion = detalle.get("vote_average", 0)
-    votos      = detalle.get("vote_count", 0)
-    sinopsis   = detalle.get("overview") or "Sin sinopsis disponible."
-    poster     = detalle.get("poster_path")
-    emoji      = tipo_emoji(media_type)
-
-    tmdb_url   = f"https://www.themoviedb.org/{media_type}/{tmdb_id}"
-    poster_url = f"https://image.tmdb.org/t/p/w500{poster}" if poster else None
-
+    poster = detalle.get("poster_path")
+    
     embed = disnake.Embed(
-        title=f"{emoji} {nombre} ({año})",
-        url=tmdb_url,
-        description=sinopsis,
-        color=0x00d4ff,
+        title=f"{'🎬' if media_type == 'movie' else '📺'} {nombre} ({año})",
+        url=f"https://www.themoviedb.org/{media_type}/{tmdb_id}",
+        description=detalle.get("overview") or "Sin sinopsis.",
+        color=0x00d4ff
     )
-    embed.add_field(name="📅 Año",        value=año,                                    inline=True)
-    embed.add_field(name="🎭 Género",     value=generos,                                inline=True)
-    embed.add_field(name="⭐ Puntuación", value=f"{puntuacion:.1f}/10 ({votos} votos)", inline=True)
-    embed.set_footer(
-        text=f"Pedido por {inter.author} • {inter.guild.name if inter.guild else 'DM'}",
-        icon_url=inter.author.display_avatar.url,
-    )
-    if poster_url:
-        embed.set_image(url=poster_url)
+    embed.add_field(name="📅 Año", value=año, inline=True)
+    embed.add_field(name="🎭 Género", value=generos or "N/A", inline=True)
+    embed.add_field(name="⭐ Puntuación", value=f"{puntuacion:.1f}/10", inline=True)
+    
+    if poster:
+        embed.set_image(url=f"https://image.tmdb.org/t/p/w500{poster}")
 
-    await inter.channel.send(
-        content=f"🗣️ {inter.author.mention} ha pedido: {emoji} {nombre} ({año})",
-        embed=embed,
-    )
+    await inter.channel.send(content=f"🗣️ {inter.author.mention} ha pedido:", embed=embed)
 
-
-# ── Eventos ───────────────────────────────────────────────────────────────────
 @bot.event
 async def on_ready():
-    print(f"✅ Bot conectado como {bot.user} (ID: {bot.user.id})")
+    print(f"✅ Bot listo: {bot.user}")
 
-
-# ── Inicio ────────────────────────────────────────────────────────────────────
 if __name__ == "__main__":
     keep_alive()
     bot.run(DISCORD_TOKEN)
