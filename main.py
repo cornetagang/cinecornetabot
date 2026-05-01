@@ -107,14 +107,15 @@ async def pedir(
         autocomplete=autocompletar_titulo,
     ),
 ):
-    await inter.response.defer()  # Visible para todos en el canal
+    # Respuesta inmediata para evitar el error "La aplicación no respondió"
+    await inter.response.send_message("✅ ¡Pedido enviado!", ephemeral=True)
 
     imdb_id = titulo
     detalle = await detalle_omdb(imdb_id)
 
     if not detalle:
-        await inter.followup.send(
-            "❌ No pude obtener los detalles del título. Intenta de nuevo."
+        await inter.channel.send(
+            f"{inter.author.mention} ❌ No pude obtener los detalles del título. Intenta de nuevo."
         )
         return
 
@@ -126,24 +127,28 @@ async def pedir(
     poster   = detalle.get("Poster", "N/A")
     emoji    = tipo_emoji(tipo)
 
+    # ── Embed ────────────────────────────────────────────────────────────────
     embed = disnake.Embed(
         title=f"{emoji} {nombre} ({año})",
         url=f"https://www.imdb.com/title/{imdb_id}/",
         description=sinopsis,
-        color=disnake.Color.gold(),
+        color=0x00d4ff,
     )
-    embed.add_field(name="📅 Año",     value=año,     inline=True)
-    embed.add_field(name="🎭 Género",  value=genero,  inline=True)
-    embed.add_field(name="🔑 IMDB ID", value=imdb_id, inline=True)
+    embed.add_field(name="📅 Año",      value=año,     inline=True)
+    embed.add_field(name="🎭 Género",   value=genero,  inline=True)
+    embed.add_field(name="🆔 IMDB ID",  value=imdb_id, inline=True)
     embed.set_footer(
         text=f"Pedido por {inter.author} • {inter.guild.name if inter.guild else 'DM'}",
         icon_url=inter.author.display_avatar.url,
     )
     if poster and poster != "N/A":
-        embed.set_thumbnail(url=poster)
+        embed.set_image(url=poster)  # Póster grande en lugar de miniatura
 
-    # Envía el embed en el mismo canal donde se usó el comando
-    await inter.followup.send(embed=embed)
+    # Mensaje al canal mencionando al usuario + embed
+    await inter.channel.send(
+        content=f"🔔 **{inter.author.mention} ha pedido:**",
+        embed=embed,
+    )
 
 
 # ── Eventos ───────────────────────────────────────────────────────────────────
