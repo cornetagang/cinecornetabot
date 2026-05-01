@@ -21,57 +21,71 @@ def keep_alive():
     t.start()
 
 # ── Configuración ────────────────────────────────────────────────────────────
-DISCORD_TOKEN = os.environ["DISCORD_TOKEN"]
-OMDB_API_KEY  = os.environ["OMDB_API_KEY"]
+DISCORD_TOKEN  = os.environ["DISCORD_TOKEN"]
+TMDB_API_KEY   = os.environ["TMDB_API_KEY"]
 
-OMDB_BASE     = "http://www.omdbapi.com/"
+TMDB_BASE      = "https://api.themoviedb.org/3"
+TMDB_LANGUAGE  = "es-MX"
+TMDB_HEADERS   = {
+    "Authorization": f"Bearer {TMDB_API_KEY}",
+    "accept": "application/json",
+}
 
 # ── Bot ──────────────────────────────────────────────────────────────────────
 intents = disnake.Intents.default()
 bot = commands.InteractionBot(intents=intents)
 
 
-# ── Helpers OMDb ─────────────────────────────────────────────────────────────
-async def buscar_omdb(query: str) -> list[dict]:
-    params = {"apikey": OMDB_API_KEY, "s": query}
+# ── Helpers TMDB ─────────────────────────────────────────────────────────────
+async def buscar_tmdb(query: str) -> list[dict]:
+    """Busca películas y series en TMDB con /search/multi en es-MX."""
+    params = {"query": query, "language": TMDB_LANGUAGE, "page": 1}
     async with aiohttp.ClientSession() as session:
         try:
             async with session.get(
-                OMDB_BASE,
+                f"{TMDB_BASE}/search/multi",
+                headers=TMDB_HEADERS,
                 params=params,
                 timeout=aiohttp.ClientTimeout(total=5),
             ) as resp:
                 if resp.status != 200:
                     return []
                 data = await resp.json()
-                if data.get("Response") != "True":
-                    return []
-                return data.get("Search", [])[:10]
+                # Filtramos solo movies y series (descartamos personas)
+                resultados = [
+                    r for r in data.get("results", [])
+                    if r.get("media_type") in ("movie", "tv")
+                ]
+                return resultados[:10]
         except Exception:
             return []
 
 
-async def detalle_omdb(imdb_id: str) -> dict | None:
-    params = {"apikey": OMDB_API_KEY, "i": imdb_id, "plot": "short"}
+async def detalle_tmdb(tmdb_id: int, media_type: str) -> dict | None:
+    """Obtiene detalles completos de una película o serie por su ID."""
+    params = {"language": TMDB_LANGUAGE}
     async with aiohttp.ClientSession() as session:
         try:
             async with session.get(
-                OMDB_BASE,
+                f"{TMDB_BASE}/{media_type}/{tmdb_id}",
+                headers=TMDB_HEADERS,
                 params=params,
                 timeout=aiohttp.ClientTimeout(total=5),
             ) as resp:
                 if resp.status != 200:
                     return None
-                data = await resp.json()
-                return data if data.get("Response") == "True" else None
+                return await resp.json()
         except Exception:
             return None
 
 
-def tipo_emoji(tipo: str) -> str:
-    return {"movie": "🎬", "series": "📺", "episode": "📎"}.get(
-        tipo.lower(), "🎞️"
-    )
+def tipo_emoji(media_type: str) -> str:
+    return {"movie": "🎬", "tv": "📺"}.get(media_type, "🎞️")
+
+
+def extraer_año(item: dict, media_type: str) -> str:
+    fecha = item.get("release_date" if media_type == "movie" else "first_air_date", "")
+    return fecha[:4] if fecha else "????"
 
 
 # ── Autocompletado ────────────────────────────────────────────────────────────
@@ -82,15 +96,22 @@ async def autocompletar_titulo(
     if len(input_usuario) < 2:
         return []
 
-    resultados = await buscar_omdb(input_usuario)
+    resultados = await buscar_tmdb(input_usuario)
     opciones = []
     for item in resultados:
-        titulo   = item.get("Title", "Sin título")
-        año      = item.get("Year", "????")
-        imdb_id  = item.get("imdbID", "")
-        emoji    = tipo_emoji(item.get("Type", ""))
+        media_type = item.get("media_type", "movie")
+        titulo     = item.get("title") or item.get("name") or "Sin título"
+        año        = extraer_año(item, media_type)
+        tmdb_id    = item.get("id", 0)
+        emoji      = tipo_emoji(media_type)
+
+        # Etiqueta visible en Discord (máx. 100 chars)
         etiqueta = f"{emoji} {titulo} ({año})"[:100]
-        opciones.append(disnake.OptionChoice(name=etiqueta, value=imdb_id))
+
+        # Valor interno: "tmdb_id|media_type" para recuperarlo en el comando
+        valor = f"{tmdb_id}|{media_type}"
+
+        opciones.append(disnake.OptionChoice(name=etiqueta, value=valor))
 
     return opciones
 
@@ -98,7 +119,7 @@ async def autocompletar_titulo(
 # ── Comando /pedir ────────────────────────────────────────────────────────────
 @bot.slash_command(
     name="pedir",
-    description="Pide una película o serie de forma mas específica.",
+    description="Pide una película o serie para que sea añadida al servidor.",
 )
 async def pedir(
     inter: disnake.ApplicationCommandInteraction,
@@ -107,10 +128,20 @@ async def pedir(
         autocomplete=autocompletar_titulo,
     ),
 ):
+    # Respuesta inmediata para evitar el error "La aplicación no respondió"
     await inter.response.send_message("✅ ¡Pedido enviado!", ephemeral=True)
 
-    imdb_id = titulo
-    detalle = await detalle_omdb(imdb_id)
+    # Decodificamos el valor "tmdb_id|media_type"
+    try:
+        tmdb_id_str, media_type = titulo.split("|")
+        tmdb_id = int(tmdb_id_str)
+    except ValueError:
+        await inter.channel.send(
+            f"{inter.author.mention} ❌ Selecciona una opción válida del autocompletado."
+        )
+        return
+
+    detalle = await detalle_tmdb(tmdb_id, media_type)
 
     if not detalle:
         await inter.channel.send(
@@ -118,31 +149,36 @@ async def pedir(
         )
         return
 
-    nombre   = detalle.get("Title",  "Desconocido")
-    año      = detalle.get("Year",   "Desconocido")
-    tipo     = detalle.get("Type",   "")
-    genero   = detalle.get("Genre",  "N/A")
-    sinopsis = detalle.get("Plot",   "Sin sinopsis disponible.")
-    poster   = detalle.get("Poster", "N/A")
-    emoji    = tipo_emoji(tipo)
+    # ── Datos del título ──────────────────────────────────────────────────────
+    nombre    = detalle.get("title") or detalle.get("name") or "Desconocido"
+    año       = extraer_año(detalle, media_type)
+    generos   = ", ".join(g["name"] for g in detalle.get("genres", [])) or "N/A"
+    puntuacion = detalle.get("vote_average", 0)
+    votos     = detalle.get("vote_count", 0)
+    sinopsis  = detalle.get("overview") or "Sin sinopsis disponible."
+    poster    = detalle.get("poster_path")
+    emoji     = tipo_emoji(media_type)
 
+    tmdb_url  = f"https://www.themoviedb.org/{media_type}/{tmdb_id}"
+    poster_url = f"https://image.tmdb.org/t/p/w500{poster}" if poster else None
+
+    # ── Embed ────────────────────────────────────────────────────────────────
     embed = disnake.Embed(
         title=f"{emoji} {nombre} ({año})",
-        url=f"https://www.imdb.com/title/{imdb_id}/",
+        url=tmdb_url,
         description=sinopsis,
         color=0x00d4ff,
     )
-    embed.add_field(name="📅 Año",     value=año,     inline=True)
-    embed.add_field(name="🎭 Género",  value=genero,  inline=True)
-    embed.add_field(name="🆔 IMDB ID", value=imdb_id, inline=True)
+    embed.add_field(name="📅 Año",        value=año,                                    inline=True)
+    embed.add_field(name="🎭 Género",     value=generos,                                inline=True)
+    embed.add_field(name="⭐ Puntuación", value=f"{puntuacion:.1f}/10 ({votos} votos)", inline=True)
     embed.set_footer(
         text=f"Pedido por {inter.author} • {inter.guild.name if inter.guild else 'DM'}",
         icon_url=inter.author.display_avatar.url,
     )
-    if poster and poster != "N/A":
-        embed.set_image(url=poster)
+    if poster_url:
+        embed.set_image(url=poster_url)
 
-    # El content sin markdown se ve limpio en notificaciones móviles
     await inter.channel.send(
         content=f"🗣️ {inter.author.mention} ha pedido: {emoji} {nombre} ({año})",
         embed=embed,
