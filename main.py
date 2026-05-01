@@ -166,8 +166,10 @@ async def pedir(
     if poster:
         embed.set_image(url=f"https://image.tmdb.org/t/p/w500{poster}")
 
+    # El content aparece en la notificación móvil → incluimos el título aquí
+    tipo = "🎬" if media_type == "movie" else "📺"
     await inter.channel.send(
-        content=f"🗣️ {inter.author.mention} ha pedido:",
+        content=f"🗣️ {inter.author.mention} ha pedido: {tipo} **{nombre} ({año})**",
         embed=embed
     )
 
