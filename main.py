@@ -96,7 +96,7 @@ async def on_application_command_autocomplete(inter: disnake.ApplicationCommandI
         await inter.response.autocomplete([])
 
 # ── Comando /pedir ────────────────────────────────────────────────────────────
-@bot.slash_command(name="pedir", description="Pide una película o serie.")
+@bot.slash_command(name="buscarpeli", description="Pide una película o serie.")
 async def pedir(
     inter: disnake.ApplicationCommandInteraction,
     titulo: str = commands.Param(description="Nombre de la película o serie")
