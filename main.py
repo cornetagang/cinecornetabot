@@ -4,7 +4,6 @@ import aiohttp
 import disnake
 from disnake.ext import commands
 from flask import Flask
-from deep_translator import GoogleTranslator
 
 # ── Flask keep-alive ─────────────────────────────────────────────────────────
 app = Flask(__name__)
@@ -30,15 +29,6 @@ OMDB_BASE     = "http://www.omdbapi.com/"
 # ── Bot ──────────────────────────────────────────────────────────────────────
 intents = disnake.Intents.default()
 bot = commands.InteractionBot(intents=intents)
-
-
-# ── Traducción ────────────────────────────────────────────────────────────────
-def traducir_a_ingles(texto: str) -> str:
-    """Traduce el texto de español a inglés. Si falla, devuelve el original."""
-    try:
-        return GoogleTranslator(source="es", target="en").translate(texto)
-    except Exception:
-        return texto
 
 
 # ── Helpers OMDb ─────────────────────────────────────────────────────────────
@@ -92,10 +82,7 @@ async def autocompletar_titulo(
     if len(input_usuario) < 2:
         return []
 
-    # Traducir antes de buscar en OMDb
-    query_en = traducir_a_ingles(input_usuario)
-
-    resultados = await buscar_omdb(query_en)
+    resultados = await buscar_omdb(input_usuario)
     opciones = []
     for item in resultados:
         titulo   = item.get("Title", "Sin título")
@@ -111,7 +98,7 @@ async def autocompletar_titulo(
 # ── Comando /pedir ────────────────────────────────────────────────────────────
 @bot.slash_command(
     name="pedir",
-    description="Pide una película o serie de forma más específica.",
+    description="Pide una película o serie para que sea añadida al servidor.",
 )
 async def pedir(
     inter: disnake.ApplicationCommandInteraction,
@@ -120,10 +107,8 @@ async def pedir(
         autocomplete=autocompletar_titulo,
     ),
 ):
-    # Respuesta inmediata para evitar el error "La aplicación no respondió"
     await inter.response.send_message("✅ ¡Pedido enviado!", ephemeral=True)
 
-    # `titulo` ya es el imdbID elegido desde el autocompletado
     imdb_id = titulo
     detalle = await detalle_omdb(imdb_id)
 
@@ -141,7 +126,6 @@ async def pedir(
     poster   = detalle.get("Poster", "N/A")
     emoji    = tipo_emoji(tipo)
 
-    # ── Embed ────────────────────────────────────────────────────────────────
     embed = disnake.Embed(
         title=f"{emoji} {nombre} ({año})",
         url=f"https://www.imdb.com/title/{imdb_id}/",
