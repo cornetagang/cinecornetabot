@@ -8,20 +8,12 @@ class Pedir(commands.Cog):
     def __init__(self, bot: commands.InteractionBot):
         self.bot = bot
 
-    async def autocomplete_titulo(
-        self,
-        inter: disnake.ApplicationCommandInteraction,
-        input: str,
-    ) -> list[disnake.OptionChoice]:
-        return await buscar_tmdb(input)
-
     @commands.slash_command(name="pedir", description="Pide una pelicula o serie.")
     async def pedir(
         self,
         inter: disnake.ApplicationCommandInteraction,
         titulo: str = commands.Param(
             description="Nombre de la pelicula o serie",
-            autocomplete=autocomplete_titulo,
         ),
         idioma: str = commands.Param(
             description="En que idioma la quieres ver?",
@@ -72,6 +64,14 @@ class Pedir(commands.Cog):
             content=f"{inter.author.mention} ha pedido: {emoji} {nombre} ({anio}) {texto_idioma}",
             embed=embed,
         )
+
+    @pedir.autocomplete("titulo")
+    async def autocomplete_titulo(
+        self,
+        inter: disnake.ApplicationCommandInteraction,
+        input: str,
+    ) -> list[disnake.OptionChoice]:
+        return await buscar_tmdb(input)
 
 
 def setup(bot: commands.InteractionBot):
