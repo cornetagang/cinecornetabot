@@ -2,6 +2,7 @@ import disnake
 from disnake.ext import commands
 
 from utils.tmdb import buscar_tmdb, detalle_tmdb, extraer_año
+from utils.catalog import catalogo
 
 
 class Pedir(commands.Cog):
@@ -36,6 +37,19 @@ class Pedir(commands.Cog):
             return
 
         nombre = detalle.get("title") or detalle.get("name")
+        titulo_original = detalle.get("original_title") or detalle.get("original_name") or ""
+
+        # Si el catalogo ya se cargo al menos una vez, chequeamos duplicados.
+        # Si todavia esta vacio (recien arranco el bot y el primer refresco no
+        # termino), dejamos pasar el pedido en vez de bloquear al usuario.
+        if catalogo.titulos and catalogo.contiene(titulo_original):
+            emoji_aviso = "🎬" if media_type == "movie" else "📺"
+            await inter.channel.send(
+                f"{inter.author.mention} {emoji_aviso} **{nombre}** ya está "
+                "disponible en Cine Corneta — no hace falta pedirlo de nuevo."
+            )
+            return
+
         anio = extraer_año(detalle, media_type)
         generos = ", ".join(g["name"] for g in detalle.get("genres", []))
         puntuacion = detalle.get("vote_average", 0)
