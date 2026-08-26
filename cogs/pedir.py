@@ -46,7 +46,7 @@ class Pedir(commands.Cog):
             emoji_aviso = "🎬" if media_type == "movie" else "📺"
             await inter.channel.send(
                 f"{inter.author.mention} {emoji_aviso} **{nombre}** ya está "
-                "disponible en Cine Corneta — no hace falta pedirlo de nuevo."
+                "disponible en el Cine Corneta, revisa antes de pedir perking."
             )
             return
 
