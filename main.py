@@ -3,6 +3,7 @@ import disnake
 from disnake.ext import commands
 
 from keep_alive import keep_alive
+from utils.catalog import iniciar_refresco_periodico
 
 DISCORD_TOKEN = os.environ["DISCORD_TOKEN"]
 
@@ -14,10 +15,19 @@ EXTENSIONS = [
     "cogs.pedir",
 ]
 
+_catalogo_task_iniciada = False
+
 
 @bot.event
 async def on_ready():
+    global _catalogo_task_iniciada
     print(f"[BOT] Listo como {bot.user} (id: {bot.user.id})")
+
+    # on_ready puede dispararse mas de una vez (reconexiones), por eso el flag:
+    # solo queremos UN loop de refresco corriendo, no uno nuevo por cada reconexion.
+    if not _catalogo_task_iniciada:
+        _catalogo_task_iniciada = True
+        bot.loop.create_task(iniciar_refresco_periodico())
 
 
 def cargar_extensiones():
