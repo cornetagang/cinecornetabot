@@ -14,7 +14,7 @@ REFRESH_INTERVAL = 20 * 60  # 20 minutos
 
 
 def normalizar(texto: str) -> str:
-    """minusculas, sin tildes/puntuacion, espacios colapsados."""
+    """minusculas, sin tildes/puntuacion, espacios colapsados. Uso: matching/busqueda."""
     if not texto:
         return ""
     texto = unicodedata.normalize("NFKD", texto)
@@ -22,6 +22,19 @@ def normalizar(texto: str) -> str:
     texto = texto.lower()
     texto = re.sub(r"[^a-z0-9]+", " ", texto)
     return texto.strip()
+
+
+def slugify(texto: str) -> str:
+    """minusculas, sin tildes/puntuacion, palabras unidas por guion.
+    Debe coincidir EXACTO con el slugify() de script.js en la web,
+    o los links del bot no van a resolver del lado del sitio."""
+    if not texto:
+        return ""
+    texto = unicodedata.normalize("NFKD", texto)
+    texto = texto.encode("ascii", "ignore").decode("ascii")
+    texto = texto.lower()
+    texto = re.sub(r"[^a-z0-9]+", "-", texto)
+    return texto.strip("-")
 
 
 async def _fetch(session: aiohttp.ClientSession, data_key: str) -> dict:
@@ -40,7 +53,8 @@ async def _fetch(session: aiohttp.ClientSession, data_key: str) -> dict:
 
 class CatalogoCache:
     def __init__(self):
-        self.titulos: set[str] = set()
+        self.titulos: set[str] = set()  # para el chequeo de duplicados en /pedir
+        self.items: list[dict] = []  # para /catalogo (busqueda + link + poster)
         self._ultima_actualizacion: float = 0.0
         self._lock = asyncio.Lock()
 
@@ -62,12 +76,27 @@ class CatalogoCache:
                 datos = dict(zip(claves, resultados))
 
             nuevos_titulos: set[str] = set()
+            nuevos_items: list[dict] = []
+
+            def agregar(item: dict, tipo: str, campo_slug: str):
+                titulo_original = item.get(campo_slug, "")
+                if not titulo_original:
+                    return
+                nuevos_titulos.add(normalizar(titulo_original))
+                nuevos_items.append({
+                    "tipo": tipo,  # "movie" | "serie"
+                    "titulo_original": titulo_original,  # usado para el link
+                    "titulo_es": item.get("title") or titulo_original,
+                    "poster": item.get("poster", ""),
+                    "synopsis": item.get("synopsis", ""),
+                    "anio": item.get("year", ""),
+                })
 
             for item in datos.get("allMovies", {}).values():
-                nuevos_titulos.add(normalizar(item.get("id", "")))
+                agregar(item, "movie", "id")
 
             for item in datos.get("series", {}).values():
-                nuevos_titulos.add(normalizar(item.get("secondTitle", "")))
+                agregar(item, "serie", "secondTitle")
 
             for clave, contenido in datos.items():
                 if not clave.startswith("saga:"):
@@ -75,12 +104,12 @@ class CatalogoCache:
                 for item in contenido.values():
                     tipo = item.get("type")
                     if tipo == "movie":
-                        nuevos_titulos.add(normalizar(item.get("id", "")))
+                        agregar(item, "movie", "id")
                     elif tipo == "serie":
-                        nuevos_titulos.add(normalizar(item.get("secondTitle", "")))
+                        agregar(item, "serie", "secondTitle")
 
-            nuevos_titulos.discard("")
             self.titulos = nuevos_titulos
+            self.items = nuevos_items
             self._ultima_actualizacion = time.monotonic()
             print(f"[Catalogo] Actualizado: {len(self.titulos)} titulos en cache "
                   f"({len(saga_ids)} sagas incluidas)")
@@ -90,6 +119,22 @@ class CatalogoCache:
 
     def contiene(self, titulo_original: str) -> bool:
         return normalizar(titulo_original) in self.titulos
+
+    def buscar(self, consulta: str, limite: int = 25) -> list[dict]:
+        """Busqueda simple por substring sobre titulo en espanol + original."""
+        q = normalizar(consulta)
+        if not q:
+            return []
+
+        coincidencias = []
+        for item in self.items:
+            texto = normalizar(f"{item['titulo_es']} {item['titulo_original']}")
+            if q in texto:
+                empieza_con = texto.startswith(q)
+                coincidencias.append((0 if empieza_con else 1, item))
+
+        coincidencias.sort(key=lambda par: par[0])
+        return [item for _, item in coincidencias[:limite]]
 
 
 # Instancia unica compartida por todo el bot.
