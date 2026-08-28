@@ -9,6 +9,14 @@ SITE_BASE_URL = os.environ.get(
 )
 
 
+def pluralizar_temporada(palabra: str) -> str:
+    """'Parte' -> 'Partes', 'Libro' -> 'Libros', 'Stage' -> 'Stages'."""
+    palabra = (palabra or "").strip()
+    if not palabra:
+        return "Temporadas"
+    return palabra + ("s" if palabra[-1].lower() in "aeiou" else "es")
+
+
 class Catalogo(commands.Cog):
     def __init__(self, bot: commands.InteractionBot):
         self.bot = bot
@@ -62,6 +70,28 @@ class Catalogo(commands.Cog):
         )
         if item.get("anio"):
             embed.add_field(name="Año", value=str(item["anio"]), inline=True)
+
+        if item["tipo"] == "movie":
+            if item.get("duracion"):
+                embed.add_field(name="Duración", value=item["duracion"], inline=True)
+        else:
+            if item.get("es_miniserie"):
+                embed.add_field(name="Formato", value="🎞️ Miniserie", inline=True)
+            elif item.get("total_temporadas"):
+                etiqueta = pluralizar_temporada(item.get("nombre_temporadas"))
+                embed.add_field(
+                    name="Temporadas",
+                    value=f"{item['total_temporadas']} {etiqueta}",
+                    inline=True,
+                )
+
+            if item.get("en_emision"):
+                embed.add_field(name="Estado", value="🔴 En emisión", inline=True)
+
+        if item.get("idioma"):
+            embed.add_field(name="Idioma", value=item["idioma"], inline=True)
+        if item.get("pedido"):
+            embed.add_field(name="Pedido por", value=item["pedido"], inline=True)
         if item.get("poster"):
             embed.set_image(url=item["poster"])
 
