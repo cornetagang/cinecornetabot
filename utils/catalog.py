@@ -37,6 +37,22 @@ def slugify(texto: str) -> str:
     return texto.strip("-")
 
 
+def formatear_duracion(valor: str) -> str:
+    """Algunas filas exportan la duracion como fecha ISO completa
+    (artefacto de Sheets al guardar una celda de tipo 'hora'),
+    ej. '1899-12-30T06:56:08.000Z' en vez de '6:56:08'. La limpiamos."""
+    if not valor:
+        return ""
+    m = re.match(r"^\d{4}-\d{2}-\d{2}T(\d{2}):(\d{2}):(\d{2})", valor)
+    if not m:
+        return valor
+    horas, minutos, segundos = m.groups()
+    horas = int(horas)
+    if horas > 0:
+        return f"{horas}:{minutos}:{segundos}"
+    return f"{int(minutos)}:{segundos}"
+
+
 async def _fetch(session: aiohttp.ClientSession, data_key: str) -> dict:
     url = f"{BASE_URL}?data={data_key}"
     try:
@@ -90,6 +106,13 @@ class CatalogoCache:
                     "poster": item.get("poster", ""),
                     "synopsis": item.get("synopsis", ""),
                     "anio": item.get("year", ""),
+                    "pedido": item.get("pedido", ""),
+                    "duracion": formatear_duracion(item.get("duration", "")),
+                    "idioma": item.get("language", ""),
+                    "total_temporadas": item.get("totalSeasons", ""),
+                    "nombre_temporadas": item.get("nombreTemporadas", ""),
+                    "en_emision": item.get("enEmision", "") == "si",
+                    "es_miniserie": bool(item.get("miniserie")),
                 })
 
             for item in datos.get("allMovies", {}).values():
