@@ -52,4 +52,19 @@ if __name__ == "__main__":
     # Si esto lanza excepcion (token invalido, etc.) dejamos que Render reinicie el proceso
     # segun su politica de restart, en vez de reintentar a mano con el mismo objeto bot
     # (bot.run() no se puede llamar dos veces sobre la misma instancia: el loop queda cerrado).
-    bot.run(DISCORD_TOKEN)
+    try:
+        bot.run(DISCORD_TOKEN)
+    except disnake.HTTPException as e:
+        if e.status == 429:
+            # Cloudflare (no Discord) esta rate-limitando la IP a nivel de login
+            # (error 1015). Si dejamos que el proceso muera al toque, Render lo
+            # reinicia en segundos y eso vuelve a pegarle a Discord, empeorando
+            # el bloqueo. Frenamos aca unos minutos antes de salir con error,
+            # asi el proximo restart de Render llega mas espaciado.
+            print(
+                "[BOT] 429 de Cloudflare al hacer login (error 1015, IP rate-limited). "
+                "Esperando 5 minutos antes de salir para no empeorar el bloqueo..."
+            )
+            import time
+            time.sleep(300)
+        raise
