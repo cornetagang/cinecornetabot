@@ -30,7 +30,7 @@ def extraer_año(item: dict, media_type: str) -> str:
 async def buscar_tmdb(busqueda: str) -> list[disnake.OptionChoice]:
     opciones = []
 
-    if len(busqueda) < 3:
+    if len(busqueda) < 2:
         return opciones
 
     url = (
