@@ -18,7 +18,7 @@ class Pedir(commands.Cog):
         ),
         idioma: str = commands.Param(
             description="En que idioma la quieres ver?",
-            choices=["Latino", "Subtitulada", "Indiferente"],
+            choices=["Latino", "Subtitulada", "Ambos (Latino y Subtitulada)", "Indiferente"],
         ),
     ):
         await inter.response.send_message("Procesando tu pedido!", ephemeral=True)
@@ -59,6 +59,7 @@ class Pedir(commands.Cog):
         texto_idioma = {
             "Latino": "en [Latino]",
             "Subtitulada": "[Subtitulada]",
+            "Ambos (Latino y Subtitulada)": "[Latino y Subtitulada]",
         }.get(idioma, "[Idioma Indiferente]")
 
         embed = disnake.Embed(
