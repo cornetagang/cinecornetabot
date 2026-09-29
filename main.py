@@ -13,7 +13,6 @@ bot = commands.InteractionBot(intents=intents)
 # Cogs a cargar. Sumar acá cuando agreguemos comandos nuevos.
 EXTENSIONS = [
     "cogs.pedir",
-    "cogs.catalogo",
 ]
 
 _catalogo_task_iniciada = False

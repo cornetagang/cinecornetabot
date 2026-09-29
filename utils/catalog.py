@@ -9,12 +9,11 @@ BASE_URL = (
     "AKfycbwAJT7ElT1guBUiZpzKaHoI7dr4Zy3D9ZNS9_taqAWZyhGgTq5ttDdWBekVA_kjgnU/exec"
 )
 
-# Cada cuanto se refresca el catalogo completo en segundo plano.
 REFRESH_INTERVAL = 20 * 60  # 20 minutos
 
 
 def normalizar(texto: str) -> str:
-    """minusculas, sin tildes/puntuacion, espacios colapsados. Uso: matching/busqueda."""
+    """minusculas, sin tildes/puntuacion, espacios colapsados."""
     if not texto:
         return ""
     texto = unicodedata.normalize("NFKD", texto)
@@ -24,35 +23,6 @@ def normalizar(texto: str) -> str:
     return texto.strip()
 
 
-def slugify(texto: str) -> str:
-    """minusculas, sin tildes/puntuacion, palabras unidas por guion.
-    Debe coincidir EXACTO con el slugify() de script.js en la web,
-    o los links del bot no van a resolver del lado del sitio."""
-    if not texto:
-        return ""
-    texto = unicodedata.normalize("NFKD", texto)
-    texto = texto.encode("ascii", "ignore").decode("ascii")
-    texto = texto.lower()
-    texto = re.sub(r"[^a-z0-9]+", "-", texto)
-    return texto.strip("-")
-
-
-def formatear_duracion(valor: str) -> str:
-    """Algunas filas exportan la duracion como fecha ISO completa
-    (artefacto de Sheets al guardar una celda de tipo 'hora'),
-    ej. '1899-12-30T06:56:08.000Z' en vez de '6:56:08'. La limpiamos."""
-    if not valor:
-        return ""
-    m = re.match(r"^\d{4}-\d{2}-\d{2}T(\d{2}):(\d{2}):(\d{2})", valor)
-    if not m:
-        return valor
-    horas, minutos, segundos = m.groups()
-    horas = int(horas)
-    if horas > 0:
-        return f"{horas}:{minutos}:{segundos}"
-    return f"{int(minutos)}:{segundos}"
-
-
 async def _fetch(session: aiohttp.ClientSession, data_key: str) -> dict:
     url = f"{BASE_URL}?data={data_key}"
     try:
@@ -60,7 +30,6 @@ async def _fetch(session: aiohttp.ClientSession, data_key: str) -> dict:
             if resp.status != 200:
                 print(f"[Catalogo] '{data_key}' -> status {resp.status}")
                 return {}
-            # content_type=None: el Apps Script a veces no manda application/json
             return await resp.json(content_type=None)
     except Exception as e:
         print(f"[Catalogo] Error obteniendo '{data_key}': {e}")
@@ -69,8 +38,7 @@ async def _fetch(session: aiohttp.ClientSession, data_key: str) -> dict:
 
 class CatalogoCache:
     def __init__(self):
-        self.titulos: set[str] = set()  # para el chequeo de duplicados en /pedir
-        self.items: list[dict] = []  # para /catalogo (busqueda + link + poster)
+        self.titulos: set[str] = set()
         self._ultima_actualizacion: float = 0.0
         self._lock = asyncio.Lock()
 
@@ -91,35 +59,22 @@ class CatalogoCache:
                 resultados = await asyncio.gather(*tareas.values())
                 datos = dict(zip(claves, resultados))
 
-            nuevos_titulos: set[str] = set()
-            nuevos_items: list[dict] = []
+            # Si lo principal vino vacio, algo fallo: no pisamos el cache bueno.
+            if not datos.get("allMovies") and not datos.get("series"):
+                print("[Catalogo] Respuesta vacia, se conserva el cache anterior")
+                return
 
-            def agregar(item: dict, tipo: str, campo_slug: str):
-                titulo_original = item.get(campo_slug, "")
-                if not titulo_original:
-                    return
-                nuevos_titulos.add(normalizar(titulo_original))
-                nuevos_items.append({
-                    "tipo": tipo,  # "movie" | "serie"
-                    "titulo_original": titulo_original,  # usado para el link
-                    "titulo_es": item.get("title") or titulo_original,
-                    "poster": item.get("poster", ""),
-                    "synopsis": item.get("synopsis", ""),
-                    "anio": item.get("year", ""),
-                    "pedido": item.get("pedido", ""),
-                    "duracion": formatear_duracion(item.get("duration", "")),
-                    "idioma": item.get("language", ""),
-                    "total_temporadas": item.get("totalSeasons", ""),
-                    "nombre_temporadas": item.get("nombreTemporadas", ""),
-                    "en_emision": item.get("enEmision", "") == "si",
-                    "es_miniserie": bool(item.get("miniserie")),
-                })
+            nuevos: set[str] = set()
 
-            for item in datos.get("allMovies", {}).values():
-                agregar(item, "movie", "id")
+            def agregar(item: dict, campo: str):
+                titulo = item.get(campo, "")
+                if titulo:
+                    nuevos.add(normalizar(titulo))
 
-            for item in datos.get("series", {}).values():
-                agregar(item, "serie", "secondTitle")
+            for item in datos["allMovies"].values():
+                agregar(item, "id")
+            for item in datos["series"].values():
+                agregar(item, "secondTitle")
 
             for clave, contenido in datos.items():
                 if not clave.startswith("saga:"):
@@ -127,45 +82,23 @@ class CatalogoCache:
                 for item in contenido.values():
                     tipo = item.get("type")
                     if tipo == "movie":
-                        agregar(item, "movie", "id")
+                        agregar(item, "id")
                     elif tipo == "serie":
-                        agregar(item, "serie", "secondTitle")
+                        agregar(item, "secondTitle")
 
-            self.titulos = nuevos_titulos
-            self.items = nuevos_items
+            self.titulos = nuevos
             self._ultima_actualizacion = time.monotonic()
             print(f"[Catalogo] Actualizado: {len(self.titulos)} titulos en cache "
                   f"({len(saga_ids)} sagas incluidas)")
 
-    def esta_vencido(self) -> bool:
-        return (time.monotonic() - self._ultima_actualizacion) > REFRESH_INTERVAL
-
     def contiene(self, titulo_original: str) -> bool:
         return normalizar(titulo_original) in self.titulos
 
-    def buscar(self, consulta: str, limite: int = 25) -> list[dict]:
-        """Busqueda simple por substring sobre titulo en espanol + original."""
-        q = normalizar(consulta)
-        if not q:
-            return []
 
-        coincidencias = []
-        for item in self.items:
-            texto = normalizar(f"{item['titulo_es']} {item['titulo_original']}")
-            if q in texto:
-                empieza_con = texto.startswith(q)
-                coincidencias.append((0 if empieza_con else 1, item))
-
-        coincidencias.sort(key=lambda par: par[0])
-        return [item for _, item in coincidencias[:limite]]
-
-
-# Instancia unica compartida por todo el bot.
 catalogo = CatalogoCache()
 
 
 async def iniciar_refresco_periodico():
-    """Loop de fondo: actualiza el catalogo al arrancar y despues cada REFRESH_INTERVAL."""
     while True:
         try:
             await catalogo.actualizar()
