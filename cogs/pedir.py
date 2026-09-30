@@ -87,8 +87,8 @@ class Pedir(commands.Cog):
 
         if poster:
             embed.set_image(url=f"https://image.tmdb.org/t/p/w500{poster}")
- 	    
-	embed.set_footer(text=f"Pedido {usados}/{limites.LIMITE_SEMANAL} de la semana")
+
+        embed.set_footer(text=f"Pedido {usados}/{limites.LIMITE_SEMANAL} de la semana")
 
         try:
             await inter.channel.send(
