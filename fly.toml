@@ -1,17 +1,22 @@
-app = 'cinecornetabot-main-1'
-primary_region = 'gru'
+app = "cinecornetabot-main-1"
+primary_region = "gru"
 
-[build]
+[env]
+DB_PATH = "/data/pedidos.db"
+
+[mounts]
+source = "data"
+destination = "/data"
+
 [http_service]
-  internal_port = 10000
-  force_https = true
-  auto_stop_machines = false
-  auto_start_machines = true
-  min_machines_running = 1
-  processes = ['app']
+auto_start_machines = true
+auto_stop_machines = false
+force_https = true
+internal_port = 10_000
+min_machines_running = 1
+processes = [ "app" ]
 
 [[vm]]
-  memory = '256mb'
-  cpu_kind = 'shared'
-  cpus = 1
-  memory_mb = 256
+cpu_kind = "shared"
+cpus = 1
+memory = "256mb"

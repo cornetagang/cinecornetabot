@@ -3,6 +3,7 @@ from disnake.ext import commands
 
 from utils.tmdb import buscar_tmdb, detalle_tmdb, extraer_año
 from utils.catalog import catalogo
+from utils import limites
 
 
 class Pedir(commands.Cog):
@@ -50,6 +51,18 @@ class Pedir(commands.Cog):
             )
             return
 
+        # Limite semanal: recien aca se descuenta, asi un duplicado no gasta cupo.
+        ok, usados = limites.consumir(inter.author.id)
+        if not ok:
+            reset = limites.proximo_reset()
+            await inter.edit_original_response(
+                content=(
+                    f"Ya usaste tus {limites.LIMITE_SEMANAL} pedidos de esta semana. "
+                    f"Se renuevan <t:{reset}:F> (<t:{reset}:R>)."
+                )
+            )
+            return
+
         anio = extraer_año(detalle, media_type)
         generos = ", ".join(g["name"] for g in detalle.get("genres", []))
         puntuacion = detalle.get("vote_average", 0)
@@ -75,9 +88,22 @@ class Pedir(commands.Cog):
         if poster:
             embed.set_image(url=f"https://image.tmdb.org/t/p/w500{poster}")
 
-        await inter.channel.send(
-            content=f"{inter.author.mention} ha pedido: {emoji} {nombre} ({anio}) {texto_idioma}",
-            embed=embed,
+        try:
+            await inter.channel.send(
+                content=f"{inter.author.mention} ha pedido: {emoji} {nombre} ({anio}) {texto_idioma}",
+                embed=embed,
+            )
+        except disnake.HTTPException:
+            limites.devolver(inter.author.id)
+            await inter.edit_original_response(
+                content="No pude publicar tu pedido en este canal (revisa los permisos del bot). "
+                "No se descontó de tu límite."
+            )
+            return
+
+        restantes = limites.LIMITE_SEMANAL - usados
+        await inter.edit_original_response(
+            content=f"Pedido enviado. Te quedan {restantes} esta semana."
         )
 
     @pedir.autocomplete("titulo")
