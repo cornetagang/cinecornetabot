@@ -38,7 +38,8 @@ async def _fetch(session: aiohttp.ClientSession, data_key: str) -> dict:
 
 class CatalogoCache:
     def __init__(self):
-        self.titulos: set[str] = set()
+        # titulo normalizado -> años con los que aparece en el catalogo
+        self.titulos: dict[str, set[str]] = {}
         self._ultima_actualizacion: float = 0.0
         self._lock = asyncio.Lock()
 
@@ -64,12 +65,13 @@ class CatalogoCache:
                 print("[Catalogo] Respuesta vacia, se conserva el cache anterior")
                 return
 
-            nuevos: set[str] = set()
+            nuevos: dict[str, set[str]] = {}
 
             def agregar(item: dict, campo: str):
                 titulo = item.get(campo, "")
                 if titulo:
-                    nuevos.add(normalizar(titulo))
+                    año = str(item.get("year", "") or "").strip()
+                    nuevos.setdefault(normalizar(titulo), set()).add(año)
 
             for item in datos["allMovies"].values():
                 agregar(item, "id")
@@ -91,8 +93,18 @@ class CatalogoCache:
             print(f"[Catalogo] Actualizado: {len(self.titulos)} titulos en cache "
                   f"({len(saga_ids)} sagas incluidas)")
 
-    def contiene(self, titulo_original: str) -> bool:
-        return normalizar(titulo_original) in self.titulos
+    def contiene(self, titulo_original: str, anio: str = "") -> bool:
+        años = self.titulos.get(normalizar(titulo_original))
+        if not años:
+            return False
+        if not anio.isdigit():
+            return True
+        for a in años:
+            if not a[:4].isdigit():
+                return True  # el catalogo no tiene año: no se puede descartar
+            if abs(int(a[:4]) - int(anio)) <= 1:
+                return True
+        return False
 
 
 catalogo = CatalogoCache()
