@@ -6,6 +6,45 @@ from utils.catalog import catalogo
 from utils import limites
 
 
+class ConfirmarPedido(disnake.ui.View):
+    """Botones Confirmar / Cancelar. El cupo se descuenta recien al confirmar."""
+
+    def __init__(self, inter: disnake.ApplicationCommandInteraction, publicar):
+        super().__init__(timeout=60)
+        self.inter = inter  # interaccion original, para editar el mensaje al expirar
+        self.autor_id = inter.author.id
+        self.publicar = publicar  # corutina: publicar(inter_del_boton)
+
+    async def interaction_check(self, inter: disnake.MessageInteraction) -> bool:
+        if inter.author.id != self.autor_id:
+            await inter.response.send_message("Este pedido no es tuyo.", ephemeral=True)
+            return False
+        return True
+
+    @disnake.ui.button(label="Confirmar pedido", style=disnake.ButtonStyle.green, emoji="✅")
+    async def confirmar(self, button: disnake.ui.Button, inter: disnake.MessageInteraction):
+        self.stop()
+        await inter.response.edit_message(content="Enviando tu pedido...", embed=None, view=None)
+        await self.publicar(inter)
+
+    @disnake.ui.button(label="Cancelar", style=disnake.ButtonStyle.red, emoji="✖️")
+    async def cancelar(self, button: disnake.ui.Button, inter: disnake.MessageInteraction):
+        self.stop()
+        await inter.response.edit_message(
+            content="Pedido cancelado. No se descontó de tu límite.", embed=None, view=None
+        )
+
+    async def on_timeout(self):
+        try:
+            await self.inter.edit_original_response(
+                content="Se acabó el tiempo para confirmar. No se descontó de tu límite.",
+                embed=None,
+                view=None,
+            )
+        except disnake.HTTPException:
+            pass
+
+
 class Pedir(commands.Cog):
     def __init__(self, bot: commands.InteractionBot):
         self.bot = bot
@@ -56,9 +95,8 @@ class Pedir(commands.Cog):
             )
             return
 
-        # Limite semanal: recien aca se descuenta, asi un duplicado no gasta cupo.
-        ok, usados = limites.consumir(inter.author.id)
-        if not ok:
+        # Si ya no le quedan pedidos, se avisa antes de mostrar la confirmacion.
+        if limites.obtener(inter.author.id) >= limites.LIMITE_SEMANAL:
             reset = limites.proximo_reset()
             await inter.edit_original_response(
                 content=(
@@ -79,37 +117,64 @@ class Pedir(commands.Cog):
             "Ambos (Latino y Subtitulada)": "[Latino y Subtitulada]",
         }.get(idioma, "[Idioma Indiferente]")
 
-        embed = disnake.Embed(
-            title=f"{emoji} {nombre} ({anio})",
-            url=f"https://www.themoviedb.org/{media_type}/{tmdb_id_str}",
-            description=detalle.get("overview") or "Sin sinopsis.",
-            color=0x00D4FF,
-        )
-        embed.add_field(name="Año", value=anio, inline=True)
-        embed.add_field(name="Genero", value=generos or "N/A", inline=True)
-        embed.add_field(name="Puntuacion", value=f"{puntuacion:.1f}/10", inline=True)
-
-        if poster:
-            embed.set_image(url=f"https://image.tmdb.org/t/p/w500{poster}")
-
-        embed.set_footer(text=f"Pedido {usados}/{limites.LIMITE_SEMANAL} de la semana")
-
-        try:
-            await inter.channel.send(
-                content=f"{inter.author.mention} ha pedido: {emoji} {nombre} ({anio}) {texto_idioma}",
-                embed=embed,
+        def construir_embed(usados_tras_pedido: int) -> disnake.Embed:
+            embed = disnake.Embed(
+                title=f"{emoji} {nombre} ({anio})",
+                url=f"https://www.themoviedb.org/{media_type}/{tmdb_id_str}",
+                description=detalle.get("overview") or "Sin sinopsis.",
+                color=0x00D4FF,
             )
-        except disnake.HTTPException:
-            limites.devolver(inter.author.id)
-            await inter.edit_original_response(
-                content="No pude publicar tu pedido en este canal (revisa los permisos del bot). "
-                "No se descontó de tu límite."
+            embed.add_field(name="Año", value=anio, inline=True)
+            embed.add_field(name="Genero", value=generos or "N/A", inline=True)
+            embed.add_field(name="Puntuacion", value=f"{puntuacion:.1f}/10", inline=True)
+            if poster:
+                embed.set_image(url=f"https://image.tmdb.org/t/p/w500{poster}")
+            embed.set_footer(
+                text=f"Pedido {usados_tras_pedido}/{limites.LIMITE_SEMANAL} de la semana"
             )
-            return
+            return embed
 
-        restantes = limites.LIMITE_SEMANAL - usados
+        async def publicar(inter_boton: disnake.MessageInteraction):
+            # Recien aca se descuenta el cupo: ni duplicados ni cancelaciones gastan.
+            ok, usados = limites.consumir(inter.author.id)
+            if not ok:
+                reset = limites.proximo_reset()
+                await inter_boton.edit_original_response(
+                    content=(
+                        f"Ya usaste tus {limites.LIMITE_SEMANAL} pedidos de esta semana. "
+                        f"Se renuevan <t:{reset}:F> (<t:{reset}:R>)."
+                    )
+                )
+                return
+
+            try:
+                await inter.channel.send(
+                    content=f"{inter.author.mention} ha pedido: {emoji} {nombre} ({anio}) {texto_idioma}",
+                    embed=construir_embed(usados),
+                )
+            except disnake.HTTPException:
+                limites.devolver(inter.author.id)
+                await inter_boton.edit_original_response(
+                    content="No pude publicar tu pedido en este canal (revisa los permisos del bot). "
+                    "No se descontó de tu límite."
+                )
+                return
+
+            restantes = limites.LIMITE_SEMANAL - usados
+            await inter_boton.edit_original_response(
+                content=f"Pedido enviado. Te quedan {restantes} esta semana."
+            )
+
+        usados_actual = limites.obtener(inter.author.id)
+        view = ConfirmarPedido(inter, publicar)
         await inter.edit_original_response(
-            content=f"Pedido enviado. Te quedan {restantes} esta semana."
+            content=(
+                f"¿Confirmas este pedido {texto_idioma}? "
+                f"Te quedan **{limites.LIMITE_SEMANAL - usados_actual}** esta semana "
+                f"(después de este te quedarían {limites.LIMITE_SEMANAL - usados_actual - 1})."
+            ),
+            embed=construir_embed(usados_actual + 1),
+            view=view,
         )
 
     @pedir.autocomplete("titulo")
