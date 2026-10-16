@@ -7,8 +7,11 @@ from utils import limites
 # IDs de Discord de los admins, separados por coma, en la variable ADMIN_IDS.
 # Ej: fly secrets set ADMIN_IDS="949026753723134094,111111111111111111"
 ADMIN_IDS = {
-    int(x) for x in os.environ.get("ADMIN_IDS", "").split(",") if x.strip().isdigit()
+    int(x.strip().strip('"').strip("'"))
+    for x in os.environ.get("ADMIN_IDS", "").split(",")
+    if x.strip().strip('"').strip("'").isdigit()
 }
+print(f"[ADMIN] {len(ADMIN_IDS)} admin(s) cargados")
 
 SIN_MENCIONES = disnake.AllowedMentions.none()
 
@@ -17,11 +20,15 @@ class AdminPedidos(commands.Cog):
     def __init__(self, bot: commands.InteractionBot):
         self.bot = bot
 
-    async def cog_slash_command_check(self, inter: disnake.ApplicationCommandInteraction) -> bool:
-        if inter.author.id not in ADMIN_IDS:
+    async def _permitido(self, inter: disnake.ApplicationCommandInteraction) -> bool:
+        """Chequeo de admin dentro de cada comando (los checks de cog no se
+        llevan bien con subcomandos: respondian y el comando seguia corriendo)."""
+        if inter.author.id in ADMIN_IDS:
+            return True
+        print(f"[ADMIN] acceso denegado a {inter.author.id} (admins cargados: {len(ADMIN_IDS)})")
+        if not inter.response.is_done():
             await inter.response.send_message("No tienes permiso para usar este comando.", ephemeral=True)
-            return False
-        return True
+        return False
 
     @commands.slash_command(name="gestionar", description="Gestionar los pedidos semanales de la gente.")
     async def gestionar(self, inter: disnake.ApplicationCommandInteraction):
@@ -33,6 +40,8 @@ class AdminPedidos(commands.Cog):
         inter: disnake.ApplicationCommandInteraction,
         usuario: disnake.User = commands.Param(description="Usuario a consultar"),
     ):
+        if not await self._permitido(inter):
+            return
         usados = limites.obtener(usuario.id)
         restantes = limites.LIMITE_SEMANAL - usados
         await inter.response.send_message(
@@ -49,6 +58,8 @@ class AdminPedidos(commands.Cog):
         cantidad: int = commands.Param(default=1, ge=1, le=limites.LIMITE_SEMANAL,
                                        description="Cuantos pedidos devolver"),
     ):
+        if not await self._permitido(inter):
+            return
         nuevo = limites.ajustar(usuario.id, limites.obtener(usuario.id) - cantidad)
         await inter.response.send_message(
             f"Listo: a {usuario.mention} ahora le quedan {limites.LIMITE_SEMANAL - nuevo} "
@@ -65,6 +76,8 @@ class AdminPedidos(commands.Cog):
         cantidad: int = commands.Param(default=1, ge=1, le=limites.LIMITE_SEMANAL,
                                        description="Cuantos pedidos descontar"),
     ):
+        if not await self._permitido(inter):
+            return
         nuevo = limites.ajustar(usuario.id, limites.obtener(usuario.id) + cantidad)
         await inter.response.send_message(
             f"Listo: a {usuario.mention} ahora le quedan {limites.LIMITE_SEMANAL - nuevo} "
@@ -79,6 +92,8 @@ class AdminPedidos(commands.Cog):
         inter: disnake.ApplicationCommandInteraction,
         usuario: disnake.User = commands.Param(description="Usuario a reiniciar"),
     ):
+        if not await self._permitido(inter):
+            return
         limites.ajustar(usuario.id, 0)
         await inter.response.send_message(
             f"Pedidos de {usuario.mention} reiniciados: tiene {limites.LIMITE_SEMANAL}/{limites.LIMITE_SEMANAL} disponibles.",
@@ -88,6 +103,8 @@ class AdminPedidos(commands.Cog):
 
     @gestionar.sub_command(name="resumen", description="Quien ha pedido esta semana y cuantos le quedan.")
     async def resumen(self, inter: disnake.ApplicationCommandInteraction):
+        if not await self._permitido(inter):
+            return
         filas = limites.listar()
         if not filas:
             await inter.response.send_message("Nadie ha pedido esta semana.", ephemeral=True)
