@@ -46,6 +46,16 @@ def _init():
 _init()
 
 
+def obtener(user_id: int) -> int:
+    """Pedidos usados por el usuario esta semana (0 si no ha pedido)."""
+    with closing(_conectar()) as c:
+        row = c.execute(
+            "SELECT cantidad FROM pedidos WHERE user_id = ? AND semana = ?",
+            (user_id, _semana()),
+        ).fetchone()
+    return row[0] if row else 0
+
+
 def consumir(user_id: int) -> tuple[bool, int]:
     """Intenta gastar un pedido. Devuelve (se_pudo, pedidos_usados_esta_semana)."""
     semana = _semana()
@@ -72,3 +82,26 @@ def devolver(user_id: int) -> None:
             "WHERE user_id = ? AND semana = ? AND cantidad > 0",
             (user_id, _semana()),
         )
+
+
+def ajustar(user_id: int, usados: int) -> int:
+    """Fija cuantos pedidos lleva usados esta semana (0 = reset total).
+    Devuelve el valor final, acotado entre 0 y LIMITE_SEMANAL."""
+    usados = max(0, min(usados, LIMITE_SEMANAL))
+    with closing(_conectar()) as c, c:
+        c.execute(
+            "INSERT INTO pedidos (user_id, semana, cantidad) VALUES (?, ?, ?) "
+            "ON CONFLICT(user_id, semana) DO UPDATE SET cantidad = excluded.cantidad",
+            (user_id, _semana(), usados),
+        )
+    return usados
+
+
+def listar() -> list[tuple[int, int]]:
+    """Lista (user_id, usados) de esta semana, de mayor a menor."""
+    with closing(_conectar()) as c:
+        return c.execute(
+            "SELECT user_id, cantidad FROM pedidos "
+            "WHERE semana = ? AND cantidad > 0 ORDER BY cantidad DESC, user_id",
+            (_semana(),),
+        ).fetchall()
