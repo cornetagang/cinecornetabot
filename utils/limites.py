@@ -5,7 +5,8 @@ from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 
 TZ = ZoneInfo("America/Santiago")
-LIMITE_SEMANAL = 3
+LIMITE_POR_DEFECTO = 3   # se usa hasta que un admin lo cambie con /gestionar limite
+MAX_LIMITE = 50          # tope de seguridad para el comando
 DB_PATH = os.environ.get("DB_PATH", "pedidos.db")
 
 
@@ -41,10 +42,42 @@ def _init():
             "cantidad INTEGER NOT NULL, "
             "PRIMARY KEY (user_id, semana))"
         )
+        c.execute(
+            "CREATE TABLE IF NOT EXISTS config ("
+            "clave TEXT PRIMARY KEY, "
+            "valor TEXT NOT NULL)"
+        )
 
 
 _init()
 
+
+# ---------- Limite semanal configurable ----------
+
+def limite_semanal() -> int:
+    """Limite de pedidos por semana (configurable por admins)."""
+    with closing(_conectar()) as c:
+        row = c.execute(
+            "SELECT valor FROM config WHERE clave = 'limite_semanal'"
+        ).fetchone()
+    if row and row[0].isdigit():
+        return int(row[0])
+    return LIMITE_POR_DEFECTO
+
+
+def fijar_limite(nuevo: int) -> int:
+    """Guarda el nuevo limite semanal. Devuelve el valor final (entre 1 y MAX_LIMITE)."""
+    nuevo = max(1, min(nuevo, MAX_LIMITE))
+    with closing(_conectar()) as c, c:
+        c.execute(
+            "INSERT INTO config (clave, valor) VALUES ('limite_semanal', ?) "
+            "ON CONFLICT(clave) DO UPDATE SET valor = excluded.valor",
+            (str(nuevo),),
+        )
+    return nuevo
+
+
+# ---------- Pedidos ----------
 
 def obtener(user_id: int) -> int:
     """Pedidos usados por el usuario esta semana (0 si no ha pedido)."""
@@ -59,12 +92,13 @@ def obtener(user_id: int) -> int:
 def consumir(user_id: int) -> tuple[bool, int]:
     """Intenta gastar un pedido. Devuelve (se_pudo, pedidos_usados_esta_semana)."""
     semana = _semana()
+    limite = limite_semanal()
     with closing(_conectar()) as c, c:
         cur = c.execute(
             "INSERT INTO pedidos (user_id, semana, cantidad) VALUES (?, ?, 1) "
             "ON CONFLICT(user_id, semana) DO UPDATE SET cantidad = cantidad + 1 "
             "WHERE cantidad < ?",
-            (user_id, semana, LIMITE_SEMANAL),
+            (user_id, semana, limite),
         )
         ok = cur.rowcount == 1
         usados = c.execute(
@@ -86,8 +120,8 @@ def devolver(user_id: int) -> None:
 
 def ajustar(user_id: int, usados: int) -> int:
     """Fija cuantos pedidos lleva usados esta semana (0 = reset total).
-    Devuelve el valor final, acotado entre 0 y LIMITE_SEMANAL."""
-    usados = max(0, min(usados, LIMITE_SEMANAL))
+    Devuelve el valor final, acotado entre 0 y MAX_LIMITE."""
+    usados = max(0, min(usados, MAX_LIMITE))
     with closing(_conectar()) as c, c:
         c.execute(
             "INSERT INTO pedidos (user_id, semana, cantidad) VALUES (?, ?, ?) "
