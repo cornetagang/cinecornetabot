@@ -14,6 +14,7 @@ bot = commands.InteractionBot(intents=intents)
 EXTENSIONS = [
     "cogs.pedir",
     "cogs.admin_pedidos",
+    "cogs.ruleta",
 ]
 
 _catalogo_task_iniciada = False
@@ -42,8 +43,8 @@ def cargar_extensiones():
 
 
 if __name__ == "__main__":
-    # Mantiene vivo el servicio web gratuito de Render (evita el sleep por inactividad).
-    # Ojo: esto NO evita bloqueos de red a nivel Discord/Cloudflare, solo el spin-down de Render.
+    # Levanta el servidor web interno: responde "OK" en / y sirve la API de la web (/api/..., solo
+    # si existe BOT_API_SECRET). Ojo: no evita bloqueos de red a nivel Discord/Cloudflare.
     keep_alive()
 
     cargar_extensiones()

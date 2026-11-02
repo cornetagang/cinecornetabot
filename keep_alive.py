@@ -4,6 +4,10 @@ from flask import Flask
 
 app = Flask(__name__)
 
+# API interna para la web (apagada si falta BOT_API_SECRET). Ver utils/api.py.
+from utils.api import bp as api_bp  # noqa: E402
+app.register_blueprint(api_bp)
+
 
 @app.route("/")
 def index():
