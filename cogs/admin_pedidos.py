@@ -2,7 +2,7 @@ import os
 import disnake
 from disnake.ext import commands
 
-from utils import limites
+from utils import economia, limites, vinculos
 
 # IDs de Discord de los admins, separados por coma, en la variable ADMIN_IDS.
 # Ej: fly secrets set ADMIN_IDS="949026753723134094,111111111111111111"
@@ -11,10 +11,6 @@ ADMIN_IDS = {
 }
 
 SIN_MENCIONES = disnake.AllowedMentions.none()
-
-
-def _restantes(usados: int) -> int:
-    return max(0, limites.limite_semanal() - usados)
 
 
 class AdminPedidos(commands.Cog):
@@ -31,39 +27,16 @@ class AdminPedidos(commands.Cog):
     async def gestionar(self, inter: disnake.ApplicationCommandInteraction):
         pass
 
-    @gestionar.sub_command(name="limite", description="Ver o cambiar el limite de pedidos por semana.")
-    async def limite(
-        self,
-        inter: disnake.ApplicationCommandInteraction,
-        cantidad: int = commands.Param(
-            default=None, ge=1, le=limites.MAX_LIMITE,
-            description="Nuevo limite semanal (si lo dejas vacio, solo muestra el actual)",
-        ),
-    ):
-        if cantidad is None:
-            await inter.response.send_message(
-                f"El limite actual es de **{limites.limite_semanal()}** pedidos por semana.",
-                ephemeral=True,
-            )
-            return
-
-        anterior = limites.limite_semanal()
-        nuevo = limites.fijar_limite(cantidad)
-        await inter.response.send_message(
-            f"Limite semanal cambiado: **{anterior}** → **{nuevo}** pedidos por persona. "
-            "Se aplica de inmediato, y los pedidos ya usados esta semana se mantienen.",
-            ephemeral=True,
-        )
-
     @gestionar.sub_command(name="ver", description="Ver cuantos pedidos le quedan a un usuario.")
     async def ver(
         self,
         inter: disnake.ApplicationCommandInteraction,
         usuario: disnake.User = commands.Param(description="Usuario a consultar"),
     ):
-        usados = limites.obtener(usuario.id)
+        e = limites.estado(usuario.id)
         await inter.response.send_message(
-            f"{usuario.mention}: usó {usados}/{limites.limite_semanal()}, le quedan {_restantes(usados)}.",
+            f"{usuario.mention}: usó {e['usados']}, apuestas {e['ajuste']:+d}, "
+            f"base {e['base']} → le quedan **{e['disponibles']}**.",
             ephemeral=True,
             allowed_mentions=SIN_MENCIONES,
         )
@@ -73,13 +46,13 @@ class AdminPedidos(commands.Cog):
         self,
         inter: disnake.ApplicationCommandInteraction,
         usuario: disnake.User = commands.Param(description="Usuario al que le devuelves pedidos"),
-        cantidad: int = commands.Param(default=1, ge=1, le=limites.MAX_LIMITE,
+        cantidad: int = commands.Param(default=1, ge=1, le=limites.LIMITE_SEMANAL,
                                        description="Cuantos pedidos devolver"),
     ):
         nuevo = limites.ajustar(usuario.id, limites.obtener(usuario.id) - cantidad)
         await inter.response.send_message(
-            f"Listo: a {usuario.mention} ahora le quedan {_restantes(nuevo)} "
-            f"({nuevo}/{limites.limite_semanal()} usados).",
+            f"Listo: a {usuario.mention} ahora le quedan {limites.disponibles(usuario.id)} "
+            f"({nuevo} usados).",
             ephemeral=True,
             allowed_mentions=SIN_MENCIONES,
         )
@@ -89,16 +62,13 @@ class AdminPedidos(commands.Cog):
         self,
         inter: disnake.ApplicationCommandInteraction,
         usuario: disnake.User = commands.Param(description="Usuario al que le descuentas pedidos"),
-        cantidad: int = commands.Param(default=1, ge=1, le=limites.MAX_LIMITE,
+        cantidad: int = commands.Param(default=1, ge=1, le=limites.LIMITE_SEMANAL,
                                        description="Cuantos pedidos descontar"),
     ):
-        actual = limites.obtener(usuario.id)
-        # No pasa del limite, pero tampoco le baja el uso si ya estaba por encima.
-        objetivo = max(actual, min(actual + cantidad, limites.limite_semanal()))
-        nuevo = limites.ajustar(usuario.id, objetivo)
+        nuevo = limites.ajustar(usuario.id, limites.obtener(usuario.id) + cantidad)
         await inter.response.send_message(
-            f"Listo: a {usuario.mention} ahora le quedan {_restantes(nuevo)} "
-            f"({nuevo}/{limites.limite_semanal()} usados).",
+            f"Listo: a {usuario.mention} ahora le quedan {limites.disponibles(usuario.id)} "
+            f"({nuevo} usados).",
             ephemeral=True,
             allowed_mentions=SIN_MENCIONES,
         )
@@ -110,31 +80,60 @@ class AdminPedidos(commands.Cog):
         usuario: disnake.User = commands.Param(description="Usuario a reiniciar"),
     ):
         limites.ajustar(usuario.id, 0)
-        limite = limites.limite_semanal()
         await inter.response.send_message(
-            f"Pedidos de {usuario.mention} reiniciados: tiene {limite}/{limite} disponibles.",
+            f"Pedidos de {usuario.mention} reiniciados: tiene {limites.disponibles(usuario.id)} disponibles.",
             ephemeral=True,
             allowed_mentions=SIN_MENCIONES,
         )
 
     @gestionar.sub_command(name="resumen", description="Quien ha pedido esta semana y cuantos le quedan.")
     async def resumen(self, inter: disnake.ApplicationCommandInteraction):
-        filas = limites.listar()
+        filas = limites.listar_estado()
         if not filas:
             await inter.response.send_message("Nadie ha pedido esta semana.", ephemeral=True)
             return
 
-        limite = limites.limite_semanal()
         lineas = [
-            f"<@{uid}>: {usados}/{limite} usados (quedan {max(0, limite - usados)})"
-            for uid, usados in filas
+            f"<@{uid}>: {usados} usados, apuestas {ajuste:+d} (quedan {disp})"
+            for uid, usados, ajuste, disp in filas
         ]
         texto = "\n".join(lineas)
         if len(texto) > 1900:
             texto = texto[:1900] + "\n..."
         reset = limites.proximo_reset()
         await inter.response.send_message(
-            f"**Pedidos de esta semana** (límite: {limite}, se renuevan <t:{reset}:R>)\n{texto}",
+            f"**Pedidos de esta semana** (se renuevan <t:{reset}:R>)\n{texto}",
+            ephemeral=True,
+            allowed_mentions=SIN_MENCIONES,
+        )
+
+    @gestionar.sub_command(name="historial", description="Ver las ultimas jugadas de un usuario (apuestas y ajustes).")
+    async def historial(
+        self,
+        inter: disnake.ApplicationCommandInteraction,
+        usuario: disnake.User = commands.Param(description="Usuario a consultar"),
+    ):
+        filas = economia.historial(usuario.id, 15)
+        if not filas:
+            await inter.response.send_message("Ese usuario no tiene jugadas.", ephemeral=True)
+            return
+        lineas = [f"<t:{ts}:R> · **{delta:+d}** · {tipo} · {detalle} · saldo {saldo}"
+                  for ts, delta, tipo, detalle, saldo in filas]
+        await inter.response.send_message(
+            f"**Movimientos de {usuario.mention}**\n" + "\n".join(lineas),
+            ephemeral=True,
+            allowed_mentions=SIN_MENCIONES,
+        )
+
+    @gestionar.sub_command(name="desvincular", description="Quitar el vinculo de un usuario con la web.")
+    async def desvincular(
+        self,
+        inter: disnake.ApplicationCommandInteraction,
+        usuario: disnake.User = commands.Param(description="Usuario a desvincular"),
+    ):
+        hubo = vinculos.desvincular(usuario.id)
+        await inter.response.send_message(
+            f"{usuario.mention} desvinculado de la web." if hubo else f"{usuario.mention} no tenía vínculo.",
             ephemeral=True,
             allowed_mentions=SIN_MENCIONES,
         )

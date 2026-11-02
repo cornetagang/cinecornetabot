@@ -96,11 +96,11 @@ class Pedir(commands.Cog):
             return
 
         # Si ya no le quedan pedidos, se avisa antes de mostrar la confirmacion.
-        if limites.obtener(inter.author.id) >= limites.LIMITE_SEMANAL:
+        if limites.disponibles(inter.author.id) <= 0:
             reset = limites.proximo_reset()
             await inter.edit_original_response(
                 content=(
-                    f"Ya usaste tus {limites.LIMITE_SEMANAL} pedidos de esta semana. "
+                    "Ya no te quedan pedidos esta semana. "
                     f"Se renuevan <t:{reset}:F> (<t:{reset}:R>)."
                 )
             )
@@ -117,7 +117,7 @@ class Pedir(commands.Cog):
             "Ambos (Latino y Subtitulada)": "[Latino y Subtitulada]",
         }.get(idioma, "[Idioma Indiferente]")
 
-        def construir_embed(usados_tras_pedido: int) -> disnake.Embed:
+        def construir_embed(restantes_tras_pedido: int) -> disnake.Embed:
             embed = disnake.Embed(
                 title=f"{emoji} {nombre} ({anio})",
                 url=f"https://www.themoviedb.org/{media_type}/{tmdb_id_str}",
@@ -130,7 +130,7 @@ class Pedir(commands.Cog):
             if poster:
                 embed.set_image(url=f"https://image.tmdb.org/t/p/w500{poster}")
             embed.set_footer(
-                text=f"Pedido {usados_tras_pedido}/{limites.LIMITE_SEMANAL} de la semana"
+                text=f"Te quedan {restantes_tras_pedido} pedido(s) esta semana"
             )
             return embed
 
@@ -141,16 +141,17 @@ class Pedir(commands.Cog):
                 reset = limites.proximo_reset()
                 await inter_boton.edit_original_response(
                     content=(
-                        f"Ya usaste tus {limites.LIMITE_SEMANAL} pedidos de esta semana. "
+                        "Ya no te quedan pedidos esta semana. "
                         f"Se renuevan <t:{reset}:F> (<t:{reset}:R>)."
                     )
                 )
                 return
+            restantes = limites.disponibles(inter.author.id)
 
             try:
                 await inter.channel.send(
                     content=f"{inter.author.mention} ha pedido: {emoji} {nombre} ({anio}) {texto_idioma}",
-                    embed=construir_embed(usados),
+                    embed=construir_embed(restantes),
                 )
             except disnake.HTTPException:
                 limites.devolver(inter.author.id)
@@ -160,20 +161,19 @@ class Pedir(commands.Cog):
                 )
                 return
 
-            restantes = limites.LIMITE_SEMANAL - usados
             await inter_boton.edit_original_response(
                 content=f"Pedido enviado. Te quedan {restantes} esta semana."
             )
 
-        usados_actual = limites.obtener(inter.author.id)
+        disp_actual = limites.disponibles(inter.author.id)
         view = ConfirmarPedido(inter, publicar)
         await inter.edit_original_response(
             content=(
                 f"¿Confirmas este pedido {texto_idioma}? "
-                f"Te quedan **{limites.LIMITE_SEMANAL - usados_actual}** esta semana "
-                f"(después de este te quedarían {limites.LIMITE_SEMANAL - usados_actual - 1})."
+                f"Te quedan **{disp_actual}** esta semana "
+                f"(después de este te quedarían {disp_actual - 1})."
             ),
-            embed=construir_embed(usados_actual + 1),
+            embed=construir_embed(disp_actual - 1),
             view=view,
         )
 
