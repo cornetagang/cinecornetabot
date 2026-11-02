@@ -90,14 +90,16 @@ _init()
 
 # ---------- movimiento de saldo (unica puerta) ----------
 
-def _aplicar(c: sqlite3.Connection, user_id: int, delta: int, tipo: str, detalle: str) -> int:
-    """Suma/resta pedidos disponibles (dentro de una transaccion abierta). Devuelve el saldo nuevo."""
+def _aplicar(c: sqlite3.Connection, user_id: int, delta: int, tipo: str, detalle: str,
+             admin: bool = False) -> int:
+    """Suma/resta pedidos disponibles (dentro de una transaccion abierta). Devuelve el saldo nuevo.
+    `admin=True` se salta el tope MAX_DISPONIBLES (el admin manda)."""
     semana = limites._semana()
     usados, ajuste = limites._fila(c, user_id, semana)
-    nuevo = limites.LIMITE_SEMANAL + ajuste - usados + delta
+    nuevo = limites._limite(c) + ajuste - usados + delta
     if nuevo < 0:
-        raise JuegoError("saldo", disponibles=nuevo - delta)
-    if delta > 0 and nuevo > MAX_DISPONIBLES:
+        raise JuegoError("saldo", disponibles=max(0, nuevo - delta))
+    if not admin and delta > 0 and nuevo > MAX_DISPONIBLES:
         raise JuegoError("tope", maximo=MAX_DISPONIBLES, disponibles=nuevo - delta)
     c.execute(
         "INSERT INTO pedidos (user_id, semana, cantidad, ajuste) VALUES (?, ?, 0, ?) "
@@ -112,9 +114,57 @@ def _aplicar(c: sqlite3.Connection, user_id: int, delta: int, tipo: str, detalle
 
 
 def mover_admin(user_id: int, delta: int, motivo: str) -> int:
-    """Ajuste manual de un admin (queda en el registro)."""
+    """Ajuste manual de un admin sobre el 'ajuste' (queda en el registro)."""
     with limites.transaccion() as c:
-        return _aplicar(c, user_id, delta, "admin", motivo)
+        return _aplicar(c, user_id, delta, "admin", motivo, admin=True)
+
+
+def _admin(c: sqlite3.Connection, user_id: int, d_usados: int, d_ajuste: int, detalle: str) -> int:
+    """Mueve 'usados' y/o 'ajuste' a la vez y deja UNA fila en movimientos.
+    delta registrado = cuanto cambian los disponibles. Devuelve el saldo resultante."""
+    semana = limites._semana()
+    c.execute(
+        "INSERT INTO pedidos (user_id, semana, cantidad, ajuste) VALUES (?, ?, ?, ?) "
+        "ON CONFLICT(user_id, semana) DO UPDATE SET "
+        "cantidad = cantidad + excluded.cantidad, ajuste = ajuste + excluded.ajuste",
+        (user_id, semana, d_usados, d_ajuste),
+    )
+    saldo = limites._disponibles(c, user_id)
+    c.execute(
+        "INSERT INTO movimientos (ts, user_id, delta, tipo, detalle, saldo) VALUES (?, ?, ?, ?, ?, ?)",
+        (int(time.time()), user_id, d_ajuste - d_usados, "admin", detalle[:200], saldo),
+    )
+    return saldo
+
+
+def devolver_admin(user_id: int, cantidad: int) -> int:
+    """Le devuelve `cantidad` pedidos: primero recupera los que gasto con /pedir y lo que sobre
+    lo suma al ajuste (asi tambien repone los perdidos en apuestas). Devuelve el saldo nuevo."""
+    with limites.transaccion() as c:
+        usados, _ = limites._fila(c, user_id, limites._semana())
+        de_usados = min(cantidad, usados)
+        de_ajuste = cantidad - de_usados
+        return _admin(c, user_id, -de_usados, de_ajuste, f"devolver {cantidad} (admin)")
+
+
+def quitar_admin(user_id: int, cantidad: int) -> tuple[int, int]:
+    """Le descuenta hasta `cantidad` pedidos (nunca bajo 0). Devuelve (quitados, saldo nuevo)."""
+    with limites.transaccion() as c:
+        disp = limites._disponibles(c, user_id)
+        quitados = min(cantidad, disp)
+        if quitados <= 0:
+            return 0, disp
+        return quitados, _admin(c, user_id, quitados, 0, f"quitar {quitados} (admin)")
+
+
+def reset_admin(user_id: int) -> int:
+    """Deja a la persona como al empezar la semana: usados 0 y ajuste 0 (borra tambien lo
+    ganado/perdido en apuestas). Devuelve el saldo nuevo (= limite semanal)."""
+    with limites.transaccion() as c:
+        usados, ajuste = limites._fila(c, user_id, limites._semana())
+        if usados == 0 and ajuste == 0:
+            return limites._disponibles(c, user_id)
+        return _admin(c, user_id, -usados, -ajuste, "reset (admin)")
 
 
 # ---------- ruleta contra la casa ----------
