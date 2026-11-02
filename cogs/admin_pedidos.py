@@ -41,18 +41,17 @@ class AdminPedidos(commands.Cog):
             allowed_mentions=SIN_MENCIONES,
         )
 
-    @gestionar.sub_command(name="devolver", description="Devolverle pedidos a un usuario.")
+    @gestionar.sub_command(name="devolver", description="Devolverle pedidos a un usuario (gastados o perdidos en apuestas).")
     async def devolver(
         self,
         inter: disnake.ApplicationCommandInteraction,
         usuario: disnake.User = commands.Param(description="Usuario al que le devuelves pedidos"),
-        cantidad: int = commands.Param(default=1, ge=1, le=limites.LIMITE_SEMANAL,
+        cantidad: int = commands.Param(default=1, ge=1, le=economia.MAX_DISPONIBLES,
                                        description="Cuantos pedidos devolver"),
     ):
-        nuevo = limites.ajustar(usuario.id, limites.obtener(usuario.id) - cantidad)
+        saldo = economia.devolver_admin(usuario.id, cantidad)
         await inter.response.send_message(
-            f"Listo: a {usuario.mention} ahora le quedan {limites.disponibles(usuario.id)} "
-            f"({nuevo} usados).",
+            f"Listo: a {usuario.mention} le devolviste {cantidad}. Ahora le quedan **{saldo}**.",
             ephemeral=True,
             allowed_mentions=SIN_MENCIONES,
         )
@@ -62,28 +61,47 @@ class AdminPedidos(commands.Cog):
         self,
         inter: disnake.ApplicationCommandInteraction,
         usuario: disnake.User = commands.Param(description="Usuario al que le descuentas pedidos"),
-        cantidad: int = commands.Param(default=1, ge=1, le=limites.LIMITE_SEMANAL,
+        cantidad: int = commands.Param(default=1, ge=1, le=economia.MAX_DISPONIBLES,
                                        description="Cuantos pedidos descontar"),
     ):
-        nuevo = limites.ajustar(usuario.id, limites.obtener(usuario.id) + cantidad)
-        await inter.response.send_message(
-            f"Listo: a {usuario.mention} ahora le quedan {limites.disponibles(usuario.id)} "
-            f"({nuevo} usados).",
-            ephemeral=True,
-            allowed_mentions=SIN_MENCIONES,
-        )
+        quitados, saldo = economia.quitar_admin(usuario.id, cantidad)
+        if quitados == 0:
+            texto = f"{usuario.mention} ya no tenía pedidos disponibles, no hay nada que quitar."
+        else:
+            texto = f"Listo: a {usuario.mention} le quitaste {quitados}. Ahora le quedan **{saldo}**."
+        await inter.response.send_message(texto, ephemeral=True, allowed_mentions=SIN_MENCIONES)
 
-    @gestionar.sub_command(name="reset", description="Reiniciar los pedidos de un usuario (vuelve a tener todos).")
+    @gestionar.sub_command(name="reset", description="Reiniciar los pedidos de un usuario (usados y apuestas a cero).")
     async def reset(
         self,
         inter: disnake.ApplicationCommandInteraction,
         usuario: disnake.User = commands.Param(description="Usuario a reiniciar"),
     ):
-        limites.ajustar(usuario.id, 0)
+        saldo = economia.reset_admin(usuario.id)
         await inter.response.send_message(
-            f"Pedidos de {usuario.mention} reiniciados: tiene {limites.disponibles(usuario.id)} disponibles.",
+            f"Pedidos de {usuario.mention} reiniciados: tiene **{saldo}** disponibles.",
             ephemeral=True,
             allowed_mentions=SIN_MENCIONES,
+        )
+
+    @gestionar.sub_command(name="limite", description="Ver o cambiar el limite semanal de pedidos de TODOS.")
+    async def limite(
+        self,
+        inter: disnake.ApplicationCommandInteraction,
+        nuevo: int = commands.Param(default=None, ge=1, le=economia.MAX_DISPONIBLES,
+                                    description="Nuevo limite semanal (vacio = solo ver el actual)"),
+    ):
+        if nuevo is None:
+            await inter.response.send_message(
+                f"El límite semanal actual es **{limites.limite_semanal()}**.", ephemeral=True
+            )
+            return
+        anterior = limites.fijar_limite(nuevo)
+        print(f"[admin] {inter.author.id} cambió el límite semanal {anterior} -> {nuevo}")
+        await inter.response.send_message(
+            f"Límite semanal cambiado de **{anterior}** a **{nuevo}** para todos. "
+            "Aplica desde ya (esta semana incluida) y se mantiene hasta que lo cambies.",
+            ephemeral=True,
         )
 
     @gestionar.sub_command(name="resumen", description="Quien ha pedido esta semana y cuantos le quedan.")
