@@ -25,7 +25,7 @@ def _env_int(nombre: str, defecto: int) -> int:
 
 # --- Reglas configurables (variables de entorno en Fly) ---
 MAX_DISPONIBLES = _env_int("MAX_DISPONIBLES", 0)      # tope de pedidos disponibles por semana (0 = sin tope)
-APUESTA_MAX = _env_int("APUESTA_MAX", 2)              # maximo por giro contra la casa
+APUESTA_MAX = _env_int("APUESTA_MAX", 0)              # maximo por giro contra la casa (0 = sin tope, solo el saldo)
 DUELO_MAX = _env_int("DUELO_MAX", 2)                  # maximo por duelo
 DUELOS_RIVAL_DIA = _env_int("DUELOS_RIVAL_DIA", 2)    # duelos al dia entre la misma pareja
 DUELOS_DIA = _env_int("DUELOS_DIA", 6)                # duelos al dia por persona
@@ -180,7 +180,7 @@ def jugar_casa(user_id: int, apuesta: str, cantidad: int, _numero: int | None = 
     """Un giro contra la casa. `_numero` solo existe para las pruebas."""
     if apuesta not in APUESTAS:
         raise JuegoError("apuesta")
-    if not 1 <= cantidad <= APUESTA_MAX:
+    if cantidad < 1 or (APUESTA_MAX and cantidad > APUESTA_MAX):
         raise JuegoError("cantidad", maximo=APUESTA_MAX)
     gana, multiplicador = APUESTAS[apuesta]
 
