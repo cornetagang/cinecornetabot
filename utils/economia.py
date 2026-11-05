@@ -24,7 +24,7 @@ def _env_int(nombre: str, defecto: int) -> int:
 
 
 # --- Reglas configurables (variables de entorno en Fly) ---
-MAX_DISPONIBLES = _env_int("MAX_DISPONIBLES", 6)      # tope de pedidos disponibles por semana
+MAX_DISPONIBLES = _env_int("MAX_DISPONIBLES", 0)      # tope de pedidos disponibles por semana (0 = sin tope)
 APUESTA_MAX = _env_int("APUESTA_MAX", 2)              # maximo por giro contra la casa
 DUELO_MAX = _env_int("DUELO_MAX", 2)                  # maximo por duelo
 DUELOS_RIVAL_DIA = _env_int("DUELOS_RIVAL_DIA", 2)    # duelos al dia entre la misma pareja
@@ -44,7 +44,14 @@ APUESTAS = {
     "docena1": (lambda n: 1 <= n <= 12, 2),
     "docena2": (lambda n: 13 <= n <= 24, 2),
     "docena3": (lambda n: 25 <= n <= 36, 2),
+    # columnas: pagan 2:1 (col1 = 1,4,7...34 / col2 = 2,5,8...35 / col3 = 3,6,9...36)
+    "col1": (lambda n: n != 0 and n % 3 == 1, 2),
+    "col2": (lambda n: n != 0 and n % 3 == 2, 2),
+    "col3": (lambda n: n != 0 and n % 3 == 0, 2),
 }
+# pleno: un numero exacto (0 a 36), paga 35:1. Se apuesta como "n0" ... "n36".
+for _i in range(37):
+    APUESTAS[f"n{_i}"] = ((lambda n, _i=_i: n == _i), 35)
 
 
 class JuegoError(Exception):
@@ -99,7 +106,7 @@ def _aplicar(c: sqlite3.Connection, user_id: int, delta: int, tipo: str, detalle
     nuevo = limites._limite(c) + ajuste - usados + delta
     if nuevo < 0:
         raise JuegoError("saldo", disponibles=max(0, nuevo - delta))
-    if not admin and delta > 0 and nuevo > MAX_DISPONIBLES:
+    if MAX_DISPONIBLES and not admin and delta > 0 and nuevo > MAX_DISPONIBLES:
         raise JuegoError("tope", maximo=MAX_DISPONIBLES, disponibles=nuevo - delta)
     c.execute(
         "INSERT INTO pedidos (user_id, semana, cantidad, ajuste) VALUES (?, ?, 0, ?) "
@@ -183,7 +190,7 @@ def jugar_casa(user_id: int, apuesta: str, cantidad: int, _numero: int | None = 
             raise JuegoError("saldo", disponibles=disp)
         # El premio nunca puede pasar el tope: se rechaza ANTES de girar (si se recortara
         # despues, se estaria cobrando una apuesta mas dificil de ganar de lo que se ofrecio).
-        if disp + cantidad * multiplicador > MAX_DISPONIBLES:
+        if MAX_DISPONIBLES and disp + cantidad * multiplicador > MAX_DISPONIBLES:
             raise JuegoError("tope", maximo=MAX_DISPONIBLES, disponibles=disp)
 
         numero = girar() if _numero is None else _numero
@@ -221,7 +228,7 @@ def _validar_duelo(c: sqlite3.Connection, retador: int, retado: int, cantidad: i
         if disp < cantidad:
             raise JuegoError("saldo_duelo", quien=uid, disponibles=disp)
         # Cualquiera de los dos puede ganar: a los dos les tiene que caber la ganancia.
-        if disp + cantidad > MAX_DISPONIBLES:
+        if MAX_DISPONIBLES and disp + cantidad > MAX_DISPONIBLES:
             raise JuegoError("tope_duelo", quien=uid, maximo=MAX_DISPONIBLES)
     desde = limites.inicio_dia()
     if _contar_duelos(c, desde, retador, retado) >= DUELOS_RIVAL_DIA:
