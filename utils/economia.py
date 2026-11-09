@@ -24,7 +24,11 @@ def _env_int(nombre: str, defecto: int) -> int:
 
 
 # --- Reglas configurables (variables de entorno en Fly) ---
-MAX_DISPONIBLES = _env_int("MAX_DISPONIBLES", 0)      # tope de pedidos disponibles por semana (0 = sin tope)
+TOPE = _env_int("MAX_DISPONIBLES", 0)                  # tope de pedidos disponibles por semana (0 = sin tope)
+# Compatibilidad: los comandos de Discord (/gestionar limite, devolver...) usan MAX_DISPONIBLES como limite
+# superior de sus numeros. Con 0 (sin tope) ese rango quedaba "de 1 a 0" y Discord lo rechazaba, asi que
+# aqui NUNCA es 0. La logica de apuestas usa TOPE, que si puede ser 0.
+MAX_DISPONIBLES = TOPE or 1000
 APUESTA_MAX = _env_int("APUESTA_MAX", 0)              # maximo por giro contra la casa (0 = sin tope, solo el saldo)
 DUELO_MAX = _env_int("DUELO_MAX", 2)                  # maximo por duelo
 DUELOS_RIVAL_DIA = _env_int("DUELOS_RIVAL_DIA", 2)    # duelos al dia entre la misma pareja
@@ -100,14 +104,14 @@ _init()
 def _aplicar(c: sqlite3.Connection, user_id: int, delta: int, tipo: str, detalle: str,
              admin: bool = False) -> int:
     """Suma/resta pedidos disponibles (dentro de una transaccion abierta). Devuelve el saldo nuevo.
-    `admin=True` se salta el tope MAX_DISPONIBLES (el admin manda)."""
+    `admin=True` se salta el tope TOPE (el admin manda)."""
     semana = limites._semana()
     usados, ajuste = limites._fila(c, user_id, semana)
     nuevo = limites._limite(c) + ajuste - usados + delta
     if nuevo < 0:
         raise JuegoError("saldo", disponibles=max(0, nuevo - delta))
-    if MAX_DISPONIBLES and not admin and delta > 0 and nuevo > MAX_DISPONIBLES:
-        raise JuegoError("tope", maximo=MAX_DISPONIBLES, disponibles=nuevo - delta)
+    if TOPE and not admin and delta > 0 and nuevo > TOPE:
+        raise JuegoError("tope", maximo=TOPE, disponibles=nuevo - delta)
     c.execute(
         "INSERT INTO pedidos (user_id, semana, cantidad, ajuste) VALUES (?, ?, 0, ?) "
         "ON CONFLICT(user_id, semana) DO UPDATE SET ajuste = ajuste + excluded.ajuste",
@@ -190,8 +194,8 @@ def jugar_casa(user_id: int, apuesta: str, cantidad: int, _numero: int | None = 
             raise JuegoError("saldo", disponibles=disp)
         # El premio nunca puede pasar el tope: se rechaza ANTES de girar (si se recortara
         # despues, se estaria cobrando una apuesta mas dificil de ganar de lo que se ofrecio).
-        if MAX_DISPONIBLES and disp + cantidad * multiplicador > MAX_DISPONIBLES:
-            raise JuegoError("tope", maximo=MAX_DISPONIBLES, disponibles=disp)
+        if TOPE and disp + cantidad * multiplicador > TOPE:
+            raise JuegoError("tope", maximo=TOPE, disponibles=disp)
 
         numero = girar() if _numero is None else _numero
         gano = gana(numero)
@@ -228,8 +232,8 @@ def _validar_duelo(c: sqlite3.Connection, retador: int, retado: int, cantidad: i
         if disp < cantidad:
             raise JuegoError("saldo_duelo", quien=uid, disponibles=disp)
         # Cualquiera de los dos puede ganar: a los dos les tiene que caber la ganancia.
-        if MAX_DISPONIBLES and disp + cantidad > MAX_DISPONIBLES:
-            raise JuegoError("tope_duelo", quien=uid, maximo=MAX_DISPONIBLES)
+        if TOPE and disp + cantidad > TOPE:
+            raise JuegoError("tope_duelo", quien=uid, maximo=TOPE)
     desde = limites.inicio_dia()
     if _contar_duelos(c, desde, retador, retado) >= DUELOS_RIVAL_DIA:
         raise JuegoError("limite_rival", maximo=DUELOS_RIVAL_DIA)
