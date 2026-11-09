@@ -49,7 +49,7 @@ def _uid_valido(valor) -> str | None:
 
 def _saldo_de(discord_id: int) -> dict:
     e = limites.estado(discord_id)
-    return {**e, "maximo": economia.MAX_DISPONIBLES, "apuesta_max": economia.APUESTA_MAX,
+    return {**e, "maximo": economia.TOPE, "apuesta_max": economia.APUESTA_MAX,
             "renueva": limites.proximo_reset()}
 
 
