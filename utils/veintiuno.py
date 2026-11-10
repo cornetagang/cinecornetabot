@@ -8,6 +8,11 @@ Reglas:
     quien este mas cerca de 21 (igual = ronda empatada).
   * Mejor de 3 rondas: gana quien llegue a 2 victorias, o quien tenga mas tras 3 rondas. Si igualan,
     cada uno recupera su apuesta.
+  * COMODINES: al empezar cada ronda cada jugador recibe uno al azar (guarda hasta 3). Se usa en tu turno,
+    ANTES de pedir o plantarte, y solo uno por turno (no gasta el turno). El rival ve cuales tienes.
+    perfecta: robas la carta que mas te acerca a la meta sin pasarte. espiar: ves la carta oculta del rival
+    esta ronda. devolver: la ultima carta que pidio el rival vuelve al mazo. meta24 / meta17: la meta de la
+    ronda cambia para los dos. escudo: si pierdes la ronda, queda empatada.
   * Cada jugador tiene TURNO_SEG segundos por turno; si se pasa, se planta solo. Con FALTAS_MAX turnos
     seguidos sin jugar pierde la partida. Tambien se puede abandonar.
 
@@ -49,6 +54,9 @@ ALFABETO = "23456789ABCDEFGHJKMNPQRSTUVWXYZ"
 LARGO_CODIGO = 4
 
 ACTIVAS = ("espera", "jugando")
+
+COMODINES = ("perfecta", "espiar", "devolver", "meta24", "meta17", "escudo")
+MAX_COMODINES = 3
 
 
 def _ahora() -> int:
@@ -153,6 +161,12 @@ def _repartir(p: dict, primero: int, t: int) -> None:
     d["turno"] = primero
     d["turno_hasta"] = t + TURNO_SEG
     d["ultimo_paso"] = False
+    d["objetivo"] = OBJETIVO
+    d["espia"], d["escudo"], d["uso_turno"] = [], [], False
+    for u in (p["creador"], p["rival"]):
+        mias = d.setdefault("comodines", {}).setdefault(str(u), [])
+        if len(mias) < MAX_COMODINES:
+            mias.append(secrets.choice(COMODINES))
 
 
 def _terminar(c: sqlite3.Connection, p: dict, ganador: int | None, motivo: str) -> None:
@@ -175,10 +189,13 @@ def _terminar(c: sqlite3.Connection, p: dict, ganador: int | None, motivo: str) 
 def _cerrar_ronda(c: sqlite3.Connection, p: dict, t: int) -> None:
     d = p["datos"]
     a, b = p["creador"], p["rival"]
+    ob = d.get("objetivo", OBJETIVO)
     ta, tb = _total(d["manos"][str(a)]), _total(d["manos"][str(b)])
-    if ta > OBJETIVO:
+    if ta > ob and tb > ob:
+        ganador, motivo = None, "empate"
+    elif ta > ob:
         ganador, motivo = b, "pasado"
-    elif tb > OBJETIVO:
+    elif tb > ob:
         ganador, motivo = a, "pasado"
     elif ta > tb:
         ganador, motivo = a, "puntos"
@@ -187,6 +204,8 @@ def _cerrar_ronda(c: sqlite3.Connection, p: dict, t: int) -> None:
     else:
         ganador, motivo = None, "empate"
 
+    if ganador is not None and (b if ganador == a else a) in d.get("escudo", []):
+        ganador, motivo = None, "escudo"   # el perdedor tenia escudo: la ronda queda empatada
     if ganador is not None:
         d["victorias"][str(ganador)] += 1
     d["ultima_ronda"] = {
@@ -217,7 +236,7 @@ def _ejecutar(c: sqlite3.Connection, p: dict, uid: int, accion: str, t: int, aut
         mano = d["manos"][str(uid)]
         mano.append(d["mazo"].pop())
         d["ultimo_paso"] = False
-        if _total(mano) > OBJETIVO:
+        if _total(mano) > d.get("objetivo", OBJETIVO):
             _cerrar_ronda(c, p, t)
             return
     elif accion == "plantarse":
@@ -229,6 +248,53 @@ def _ejecutar(c: sqlite3.Connection, p: dict, uid: int, accion: str, t: int, aut
         raise JuegoError("accion")
     d["turno"] = _otro(p, uid)
     d["turno_hasta"] = t + TURNO_SEG
+    d["uso_turno"] = False
+
+
+def _usar_comodin(c: sqlite3.Connection, p: dict, uid: int, nombre: str, t: int) -> None:
+    """Usa un comodin en tu turno (no gasta el turno). Si no tendria efecto, se rechaza y NO se gasta."""
+    d = p["datos"]
+    if d["turno"] != uid:
+        raise JuegoError("no_es_tu_turno")
+    if d.get("uso_turno"):
+        raise JuegoError("un_comodin_por_turno")
+    mias = d["comodines"][str(uid)]
+    if nombre not in mias:
+        raise JuegoError("no_tienes_comodin")
+    mano, rival = d["manos"][str(uid)], _otro(p, uid)
+    mano_r, ob = d["manos"][str(rival)], d.get("objetivo", OBJETIVO)
+    cerrar = False
+    if nombre == "perfecta":
+        cabe = [x for x in d["mazo"] if x <= ob - _total(mano)]
+        if not cabe:
+            raise JuegoError("sin_efecto")
+        carta = max(cabe)
+        d["mazo"].remove(carta)
+        mano.append(carta)
+        d["ultimo_paso"] = False
+    elif nombre == "espiar":
+        if uid in d["espia"]:
+            raise JuegoError("sin_efecto")
+        d["espia"].append(uid)
+    elif nombre == "devolver":
+        if len(mano_r) <= 2:                       # solo se devuelven cartas PEDIDAS, no las del reparto
+            raise JuegoError("sin_efecto")
+        d["mazo"].insert(secrets.randbelow(len(d["mazo"]) + 1), mano_r.pop())
+    elif nombre in ("meta24", "meta17"):
+        if ob != OBJETIVO:
+            raise JuegoError("sin_efecto")
+        d["objetivo"] = ob = 24 if nombre == "meta24" else 17
+        cerrar = _total(mano) > ob or _total(mano_r) > ob   # alguien ya se pasa de la nueva meta
+    elif nombre == "escudo":
+        if uid in d["escudo"]:
+            raise JuegoError("sin_efecto")
+        d["escudo"].append(uid)
+    d["faltas"][str(uid)] = 0
+    mias.remove(nombre)
+    d["uso_turno"] = True
+    d["evento"] = {"n": d.get("evento", {}).get("n", 0) + 1, "quien": uid, "c": nombre}
+    if cerrar:
+        _cerrar_ronda(c, p, t)
 
 
 def _resolver_tiempo(c: sqlite3.Connection, p: dict, ahora: int) -> bool:
@@ -289,7 +355,15 @@ def _vista(p: dict, uid: int, ahora: int) -> dict:
         "mi_mano": list(mi), "mi_total": _total(mi),           # mi_mano[0] es MI carta boca abajo
         "rival_mano": list(riv[1:]), "rival_visible": _total(riv[1:]),
         "rival_tiene_oculta": True,                              # solo se sabe que existe
+        "objetivo": d.get("objetivo", OBJETIVO),
+        "mis_comodines": list(d.get("comodines", {}).get(str(uid), [])),
+        "rival_comodines": list(d.get("comodines", {}).get(str(rival), [])),   # el rival los ve, como en RE7
+        "mi_escudo": uid in d.get("escudo", []),
+        "espiando": riv[0] if uid in d.get("espia", []) else None,   # SOLO quien espio ve la carta oculta
     })
+    ev = d.get("evento")
+    if ev:
+        v["evento"] = {"n": ev["n"], "quien": "yo" if ev["quien"] == uid else "rival", "c": ev["c"]}
     ur = d.get("ultima_ronda")
     if ur:
         def quien(g):
@@ -306,6 +380,7 @@ def _vista(p: dict, uid: int, ahora: int) -> dict:
             "rival_planto": bool(d["ultimo_paso"] and mio),
             "puedo_pedir": mio and bool(d["mazo"]),
             "puedo_plantarme": mio,
+            "puedo_comodin": mio and not d.get("uso_turno", False),
         })
     else:
         r = d["resultado"]
@@ -408,10 +483,11 @@ def estado(uid: int, codigo: str) -> dict:
         return _vista(p, uid, ahora)
 
 
-def accion(uid: int, codigo: str, que: str) -> dict:
-    """'pedir', 'plantarse' o 'abandonar'. Si el plazo ya vencio, primero se resuelve el plazo."""
+def accion(uid: int, codigo: str, que: str, comodin: str | None = None) -> dict:
+    """'pedir', 'plantarse', 'abandonar' o 'comodin' (con el nombre en `comodin`).
+    Si el plazo ya vencio, primero se resuelve el plazo."""
     codigo = normalizar_codigo(codigo)
-    if que not in ("pedir", "plantarse", "abandonar"):
+    if que not in ("pedir", "plantarse", "abandonar", "comodin") or (que == "comodin" and comodin not in COMODINES):
         raise JuegoError("accion")
     ahora = _ahora()
     with limites.transaccion() as c:
@@ -426,6 +502,8 @@ def accion(uid: int, codigo: str, que: str) -> dict:
         if p["estado"] == "jugando":
             if que == "abandonar":
                 _terminar(c, p, _otro(p, uid), "abandono")
+            elif que == "comodin":
+                _usar_comodin(c, p, uid, comodin, ahora)
             else:
                 _ejecutar(c, p, uid, que, ahora)
         _guardar(c, p, ahora)
