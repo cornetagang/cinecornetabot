@@ -1,541 +1,212 @@
-"""El 21 (estilo "Banned Footage" de RE7): duelo 1v1 entre usuarios, por salas con codigo.
+"""API interna para la web (la llama SOLO el Worker de Cloudflare, nunca el navegador).
 
-Reglas:
-  * Baraja del 1 al 11 (sin repetir). Cada ronda se baraja una baraja nueva.
-  * Cada jugador recibe 2 cartas: la PRIMERA va boca abajo (solo la ve su dueno), la otra boca arriba.
-  * Por turnos: "pedir" (una carta boca arriba) o "plantarse". Si alguien se pasa de 21 pierde la ronda
-    al instante. Si un jugador se planta y el otro tambien en su turno siguiente, se destapa y gana
-    quien este mas cerca de 21 (igual = ronda empatada).
-  * Mejor de 3 rondas: gana quien llegue a 2 victorias, o quien tenga mas tras 3 rondas. Si igualan,
-    cada uno recupera su apuesta.
-  * COMODINES: al empezar cada ronda cada jugador recibe uno al azar (guarda hasta 3). Se usa en tu turno,
-    ANTES de pedir o plantarte, y solo uno por turno (no gasta el turno). El rival ve cuales tienes.
-    perfecta: robas la carta que mas te acerca a la meta sin pasarte. espiar: ves la carta oculta del rival
-    esta ronda. devolver: la ultima carta que pidio el rival vuelve al mazo. meta24 / meta17: la meta de la
-    ronda cambia para los dos. escudo: si pierdes la ronda, queda empatada.
-  * Cada jugador tiene TURNO_SEG segundos por turno; si se pasa, se planta solo. Con FALTAS_MAX turnos
-    seguidos sin jugar pierde la partida. Tambien se puede abandonar.
-
-Dinero (misma regla de oro que economia.py): todo movimiento pasa por economia._aplicar(), dentro de
-UNA transaccion, con una fila en 'movimientos' (tipo "21").
-  * La apuesta se RETIENE cuando entra el rival (no al crear la sala), a los dos a la vez.
-  * Al terminar, el ganador recibe el bote (2 x apuesta); en empate se devuelve a cada uno.
-  * Los cobros/devoluciones saltan el tope MAX_DISPONIBLES: es plata ya apostada, no puede fallar.
-  * Los pedidos son SEMANALES: la apuesta se descuenta de los de esa semana. Si la partida termina ya
-    en otra semana (cruzo el lunes 00:00), no se paga nada: esos pedidos vencieron con su semana, y
-    pagarlos en la nueva seria pasar pedidos de una semana a otra.
-
-Estado: todo vive en SQLite (tabla v21_partidas). El servidor decide todo; el navegador solo pide
-acciones. Los plazos se resuelven "perezosamente" (al consultar/actuar o con barrer()), asi no hace
-falta ningun proceso en segundo plano para que una partida abandonada se cierre.
+Autenticacion: cabecera  Authorization: Bearer <BOT_API_SECRET>  (secret de Fly y del Worker).
+El Worker es quien verifica la sesion de Firebase del usuario y manda aqui su uid ya verificado.
+Sin BOT_API_SECRET la API queda apagada (503).
 """
-import json
-import secrets
-import sqlite3
+import hmac
+import os
+import re
 import time
-from contextlib import closing
 
-from utils import limites
-from utils.economia import JuegoError, _aplicar, _env_int
+from flask import Blueprint, jsonify, request
 
-# --- Reglas configurables (variables de entorno en Fly) ---
-APUESTA_MAX_21 = _env_int("V21_APUESTA_MAX", 0)   # maximo por partida (0 = sin tope, solo el saldo)
-TURNO_SEG = _env_int("V21_TURNO_SEG", 60)         # segundos por turno
-SALA_ESPERA_SEG = _env_int("V21_SALA_SEG", 600)   # una sala sin rival se borra a los 10 min
-FALTAS_MAX = _env_int("V21_FALTAS_MAX", 3)        # turnos seguidos sin jugar antes de perder
+from utils import economia, limites, veintiuno, vinculos
+from utils.economia import JuegoError
 
-OBJETIVO = 21
-RONDAS = 3
-VICTORIAS = 2
-PAUSA_RONDA_SEG = 5   # tiempo extra al empezar una ronda, para que se vea el resultado de la anterior
+bp = Blueprint("api", __name__, url_prefix="/api")
 
-# Sin 0/O/1/I/L para que no se confundan al dictarlo.
-ALFABETO = "23456789ABCDEFGHJKMNPQRSTUVWXYZ"
-LARGO_CODIGO = 4
+_UID_RE = re.compile(r"^[A-Za-z0-9_-]{6,128}$")
 
-ACTIVAS = ("espera", "jugando")
-
-COMODINES = ("perfecta", "espiar", "devolver", "meta24", "meta17", "escudo")
-MAX_COMODINES = 3
+# codigo de error -> estado HTTP (los de validacion son 400; los de estado del juego, 409)
+_ESTADOS = {
+    "apuesta": 400, "cantidad": 400, "codigo_invalido": 404, "codigo_vencido": 410,
+    "saldo": 409, "tope": 409, "ya_vinculado": 409, "uid_vinculado": 409, "no_vinculado": 404,
+    # el 21
+    "apuesta_invalida": 400, "accion": 400, "sala_no_existe": 404, "no_participas": 403,
+    "no_es_tu_turno": 409, "sin_cartas": 409, "ya_en_partida": 409, "sala_llena": 409,
+    "tu_sala": 409, "sala_invalida": 409, "un_comodin_por_turno": 409, "no_tienes_comodin": 409, "sin_efecto": 409, "sin_codigos": 503, "demasiados_intentos": 429,
+}
 
 
-def _ahora() -> int:
-    return int(time.time())
+def _error(codigo: str, status: int | None = None, **datos):
+    return jsonify({"error": codigo, **datos}), status or _ESTADOS.get(codigo, 400)
 
 
-# ---------- tabla ----------
-
-def _init():
-    with closing(limites._conectar()) as c, c:
-        c.execute(
-            "CREATE TABLE IF NOT EXISTS v21_partidas ("
-            "id INTEGER PRIMARY KEY AUTOINCREMENT, codigo TEXT NOT NULL, "
-            "estado TEXT NOT NULL, creador INTEGER NOT NULL, rival INTEGER, "
-            "apuesta INTEGER NOT NULL, creada INTEGER NOT NULL, actualizada INTEGER NOT NULL, "
-            "datos TEXT NOT NULL DEFAULT '{}')"
-        )
-        c.execute("CREATE INDEX IF NOT EXISTS ix_v21_codigo ON v21_partidas (codigo, id)")
-        c.execute("CREATE INDEX IF NOT EXISTS ix_v21_estado ON v21_partidas (estado)")
+@bp.before_request
+def _autenticar():
+    secreto = os.environ.get("BOT_API_SECRET", "")
+    if not secreto:
+        return _error("api_apagada", 503)
+    enviado = request.headers.get("Authorization", "").removeprefix("Bearer ").strip()
+    if not hmac.compare_digest(enviado.encode(), secreto.encode()):
+        return _error("no_autorizado", 401)
 
 
-_init()
+def _uid_valido(valor) -> str | None:
+    return valor if isinstance(valor, str) and _UID_RE.match(valor) else None
 
 
-# ---------- utilidades ----------
-
-def _barajar() -> list[int]:
-    """Baraja del 1 al 11, mezclada con `secrets` (no predecible). Se saca de atras con pop()."""
-    mazo = list(range(1, 12))
-    for i in range(len(mazo) - 1, 0, -1):
-        j = secrets.randbelow(i + 1)
-        mazo[i], mazo[j] = mazo[j], mazo[i]
-    return mazo
+def _saldo_de(discord_id: int) -> dict:
+    e = limites.estado(discord_id)
+    return {**e, "maximo": economia.TOPE, "apuesta_max": economia.APUESTA_MAX,
+            "renueva": limites.proximo_reset()}
 
 
-def normalizar_codigo(codigo: str) -> str:
-    return "".join(str(codigo).split()).upper()
+@bp.post("/vincular")
+def vincular():
+    datos = request.get_json(silent=True) or {}
+    uid = _uid_valido(datos.get("uid"))
+    if not uid:
+        return _error("uid_invalido")
+    try:
+        discord_id = vinculos.canjear(str(datos.get("codigo", "")), uid)
+    except JuegoError as e:
+        return _error(e.codigo)
+    # La ID de Discord se devuelve como texto: en JavaScript los numeros de 64 bits pierden precision.
+    return jsonify({"ok": True, "discord_id": str(discord_id)})
 
 
-def _codigo_nuevo(c: sqlite3.Connection) -> str:
-    for _ in range(50):
-        codigo = "".join(secrets.choice(ALFABETO) for _ in range(LARGO_CODIGO))
-        usado = c.execute(
-            "SELECT 1 FROM v21_partidas WHERE codigo = ? AND estado IN ('espera', 'jugando')", (codigo,)
-        ).fetchone()
-        if not usado:
-            return codigo
-    raise JuegoError("sin_codigos")  # solo si hay una cantidad absurda de salas abiertas
+@bp.get("/saldo")
+def saldo():
+    uid = _uid_valido(request.args.get("uid"))
+    if not uid:
+        return _error("uid_invalido")
+    discord_id = vinculos.discord_de(uid)
+    if discord_id is None:
+        return jsonify({"vinculado": False})
+    return jsonify({"vinculado": True, "discord_id": str(discord_id), **_saldo_de(discord_id)})
 
 
-_COLS = "id, codigo, estado, creador, rival, apuesta, creada, actualizada, datos"
+@bp.post("/ruleta")
+def ruleta():
+    datos = request.get_json(silent=True) or {}
+    uid = _uid_valido(datos.get("uid"))
+    if not uid:
+        return _error("uid_invalido")
+    discord_id = vinculos.discord_de(uid)
+    if discord_id is None:
+        return _error("no_vinculado")
+    cantidad = datos.get("cantidad")
+    if not isinstance(cantidad, int) or isinstance(cantidad, bool):
+        return _error("cantidad", maximo=economia.APUESTA_MAX)
+    try:
+        r = economia.jugar_casa(discord_id, str(datos.get("apuesta", "")), cantidad)
+    except JuegoError as e:
+        return _error(e.codigo, **e.datos)
+    return jsonify({"ok": True, **r, "renueva": limites.proximo_reset()})
 
 
-def _fila_a_partida(f) -> dict:
-    return {
-        "id": f[0], "codigo": f[1], "estado": f[2], "creador": f[3], "rival": f[4],
-        "apuesta": f[5], "creada": f[6], "actualizada": f[7], "datos": json.loads(f[8] or "{}"),
-    }
+# ---------- el 21 (duelo 1v1 por codigo de sala) ----------
+# Todas las rutas reciben el uid de Firebase ya verificado por el Worker y lo traducen a la ID de Discord.
+# Las respuestas llevan `disponibles` para que la web actualice el saldo sin otra llamada.
+
+_FALLOS: dict[int, list[float]] = {}   # discord_id -> momentos de codigos de sala incorrectos
+_FALLOS_MAX = 8                        # intentos fallidos...
+_FALLOS_VENTANA = 300                  # ...cada 5 minutos (memoria del proceso: es un freno, no una garantia)
 
 
-def _cargar(c: sqlite3.Connection, codigo: str) -> dict | None:
-    """La partida MAS RECIENTE con ese codigo (un codigo se puede reutilizar cuando la anterior termino)."""
-    f = c.execute(
-        f"SELECT {_COLS} FROM v21_partidas WHERE codigo = ? ORDER BY id DESC LIMIT 1", (codigo,)
-    ).fetchone()
-    return _fila_a_partida(f) if f else None
-
-
-def _guardar(c: sqlite3.Connection, p: dict, ahora: int) -> None:
-    p["actualizada"] = ahora
-    c.execute(
-        "UPDATE v21_partidas SET estado = ?, rival = ?, actualizada = ?, datos = ? WHERE id = ?",
-        (p["estado"], p["rival"], ahora, json.dumps(p["datos"], separators=(",", ":")), p["id"]),
-    )
-
-
-def _otro(p: dict, uid: int) -> int:
-    return p["rival"] if uid == p["creador"] else p["creador"]
-
-
-def _total(mano: list[int]) -> int:
-    return sum(mano)
-
-
-def _activa_de(c: sqlite3.Connection, uid: int) -> str | None:
-    f = c.execute(
-        "SELECT codigo FROM v21_partidas WHERE (creador = ? OR rival = ?) "
-        "AND estado IN ('espera', 'jugando') ORDER BY id DESC LIMIT 1", (uid, uid),
-    ).fetchone()
-    return f[0] if f else None
-
-
-# ---------- logica de la partida (opera sobre el dict `p`, dentro de una transaccion) ----------
-
-def _repartir(p: dict, primero: int, t: int) -> None:
-    """Empieza una ronda: baraja nueva, 2 cartas a cada uno (la primera, boca abajo)."""
-    d = p["datos"]
-    mazo = _barajar()
-    d["manos"] = {str(p["creador"]): [mazo.pop(), mazo.pop()], str(p["rival"]): [mazo.pop(), mazo.pop()]}
-    d["mazo"] = mazo
-    d["primero"] = primero
-    d["turno"] = primero
-    d["turno_hasta"] = t + TURNO_SEG
-    d["ultimo_paso"] = False
-    d["objetivo"] = OBJETIVO
-    d["espia"], d["escudo"], d["uso_turno"] = [], [], False
-    for u in (p["creador"], p["rival"]):
-        mias = d.setdefault("comodines", {}).setdefault(str(u), [])
-        if len(mias) < MAX_COMODINES:
-            mias.append(secrets.choice(COMODINES))
-
-
-def _terminar(c: sqlite3.Connection, p: dict, ganador: int | None, motivo: str) -> None:
-    """Cierra la partida y paga: bote al ganador, o devolucion a cada uno si no hay ganador."""
-    d = p["datos"]
-    p["estado"] = "terminada"
-    d["resultado"] = {"ganador": ganador, "motivo": motivo}
-    a, b, apuesta, cod = p["creador"], p["rival"], p["apuesta"], p["codigo"]
-    if d.get("semana") != limites._semana():
-        d["resultado"]["vencida"] = True   # la semana de la apuesta ya paso: no se mueve nada
-        return
-    if ganador is None:
-        _aplicar(c, a, apuesta, "21", f"empate {cod}: devolucion", admin=True)
-        _aplicar(c, b, apuesta, "21", f"empate {cod}: devolucion", admin=True)
+def _fallos_recientes(discord_id: int) -> list[float]:
+    ahora = time.time()
+    lista = [t for t in _FALLOS.get(discord_id, []) if ahora - t < _FALLOS_VENTANA]
+    if lista:
+        _FALLOS[discord_id] = lista
     else:
-        perdedor = b if ganador == a else a
-        _aplicar(c, ganador, 2 * apuesta, "21", f"gana {cod} vs {perdedor} ({motivo})", admin=True)
+        _FALLOS.pop(discord_id, None)
+    return lista
 
 
-def _cerrar_ronda(c: sqlite3.Connection, p: dict, t: int) -> None:
-    d = p["datos"]
-    a, b = p["creador"], p["rival"]
-    ob = d.get("objetivo", OBJETIVO)
-    ta, tb = _total(d["manos"][str(a)]), _total(d["manos"][str(b)])
-    if ta > ob and tb > ob:
-        ganador, motivo = None, "empate"
-    elif ta > ob:
-        ganador, motivo = b, "pasado"
-    elif tb > ob:
-        ganador, motivo = a, "pasado"
-    elif ta > tb:
-        ganador, motivo = a, "puntos"
-    elif tb > ta:
-        ganador, motivo = b, "puntos"
-    else:
-        ganador, motivo = None, "empate"
-
-    if ganador is not None and (b if ganador == a else a) in d.get("escudo", []):
-        ganador, motivo = None, "escudo"   # el perdedor tenia escudo: la ronda queda empatada
-    if ganador is not None:
-        d["victorias"][str(ganador)] += 1
-    d["ultima_ronda"] = {
-        "ronda": d["ronda"], "ganador": ganador, "motivo": motivo,
-        "manos": {str(a): list(d["manos"][str(a)]), str(b): list(d["manos"][str(b)])},
-    }
-
-    va, vb = d["victorias"][str(a)], d["victorias"][str(b)]
-    if va >= VICTORIAS or vb >= VICTORIAS or d["ronda"] >= RONDAS:
-        final = a if va > vb else (b if vb > va else None)
-        _terminar(c, p, final, "rondas")
-        return
-    d["ronda"] += 1
-    _repartir(p, _otro(p, d["primero"]), t + PAUSA_RONDA_SEG)
+def _jugador(datos) -> tuple[int | None, tuple | None]:
+    """(discord_id, None) si la persona esta vinculada; si no, (None, respuesta de error)."""
+    uid = _uid_valido(datos.get("uid"))
+    if not uid:
+        return None, _error("uid_invalido")
+    discord_id = vinculos.discord_de(uid)
+    if discord_id is None:
+        return None, _error("no_vinculado")
+    return discord_id, None
 
 
-def _ejecutar(c: sqlite3.Connection, p: dict, uid: int, accion: str, t: int, auto: bool = False) -> None:
-    """Un turno: 'pedir' o 'plantarse'. `t` es la hora de referencia para el siguiente plazo."""
-    d = p["datos"]
-    if d["turno"] != uid:
-        raise JuegoError("no_es_tu_turno")
-    if not auto:
-        d["faltas"][str(uid)] = 0
-
-    if accion == "pedir":
-        if not d["mazo"]:
-            raise JuegoError("sin_cartas")
-        mano = d["manos"][str(uid)]
-        mano.append(d["mazo"].pop())
-        d["ultimo_paso"] = False
-        if _total(mano) > d.get("objetivo", OBJETIVO):
-            _cerrar_ronda(c, p, t)
-            return
-    elif accion == "plantarse":
-        if d["ultimo_paso"]:  # el rival ya se habia plantado: se destapa
-            _cerrar_ronda(c, p, t)
-            return
-        d["ultimo_paso"] = True
-    else:
-        raise JuegoError("accion")
-    d["turno"] = _otro(p, uid)
-    d["turno_hasta"] = t + TURNO_SEG
-    d["uso_turno"] = False
+def _con_saldo(vista: dict, discord_id: int):
+    return jsonify({"ok": True, **vista, "disponibles": limites.estado(discord_id).get("disponibles")})
 
 
-def _usar_comodin(c: sqlite3.Connection, p: dict, uid: int, nombre: str, t: int) -> None:
-    """Usa un comodin en tu turno (no gasta el turno). Si no tendria efecto, se rechaza y NO se gasta."""
-    d = p["datos"]
-    if d["turno"] != uid:
-        raise JuegoError("no_es_tu_turno")
-    if d.get("uso_turno"):
-        raise JuegoError("un_comodin_por_turno")
-    mias = d["comodines"][str(uid)]
-    if nombre not in mias:
-        raise JuegoError("no_tienes_comodin")
-    mano, rival = d["manos"][str(uid)], _otro(p, uid)
-    mano_r, ob = d["manos"][str(rival)], d.get("objetivo", OBJETIVO)
-    cerrar = False
-    if nombre == "perfecta":
-        cabe = [x for x in d["mazo"] if x <= ob - _total(mano)]
-        if not cabe:
-            raise JuegoError("sin_efecto")
-        carta = max(cabe)
-        d["mazo"].remove(carta)
-        mano.append(carta)
-        d["ultimo_paso"] = False
-    elif nombre == "espiar":
-        if uid in d["espia"]:
-            raise JuegoError("sin_efecto")
-        d["espia"].append(uid)
-    elif nombre == "devolver":
-        if len(mano_r) <= 2:                       # solo se devuelven cartas PEDIDAS, no las del reparto
-            raise JuegoError("sin_efecto")
-        d["mazo"].insert(secrets.randbelow(len(d["mazo"]) + 1), mano_r.pop())
-    elif nombre in ("meta24", "meta17"):
-        if ob != OBJETIVO:
-            raise JuegoError("sin_efecto")
-        d["objetivo"] = ob = 24 if nombre == "meta24" else 17
-        cerrar = _total(mano) > ob or _total(mano_r) > ob   # alguien ya se pasa de la nueva meta
-    elif nombre == "escudo":
-        if uid in d["escudo"]:
-            raise JuegoError("sin_efecto")
-        d["escudo"].append(uid)
-    d["faltas"][str(uid)] = 0
-    mias.remove(nombre)
-    d["uso_turno"] = True
-    d["evento"] = {"n": d.get("evento", {}).get("n", 0) + 1, "quien": uid, "c": nombre}
-    if cerrar:
-        _cerrar_ronda(c, p, t)
+@bp.post("/21/crear")
+def v21_crear():
+    datos = request.get_json(silent=True) or {}
+    did, fallo = _jugador(datos)
+    if fallo:
+        return fallo
+    apuesta = datos.get("apuesta")
+    if not isinstance(apuesta, int) or isinstance(apuesta, bool):
+        return _error("apuesta_invalida", maximo=veintiuno.APUESTA_MAX_21)
+    try:
+        sala = veintiuno.crear_sala(did, apuesta)
+    except JuegoError as e:
+        return _error(e.codigo, **e.datos)
+    return jsonify({"ok": True, **sala})
 
 
-def _resolver_tiempo(c: sqlite3.Connection, p: dict, ahora: int) -> bool:
-    """Aplica los plazos vencidos (planta solo; tras FALTAS_MAX seguidas, pierde). True si cambio algo."""
-    cambio = False
-    while p["estado"] == "jugando" and ahora >= p["datos"]["turno_hasta"]:
-        d = p["datos"]
-        uid = d["turno"]
-        d["faltas"][str(uid)] += 1
-        cambio = True
-        if d["faltas"][str(uid)] >= FALTAS_MAX:
-            _terminar(c, p, _otro(p, uid), "tiempo")
-            break
-        # Se juega "como si" hubiera vencido en su hora, no ahora: una partida abandonada se cierra igual.
-        _ejecutar(c, p, uid, "plantarse", d["turno_hasta"], auto=True)
-    return cambio
+@bp.post("/21/unirse")
+def v21_unirse():
+    datos = request.get_json(silent=True) or {}
+    did, fallo = _jugador(datos)
+    if fallo:
+        return fallo
+    if len(_fallos_recientes(did)) >= _FALLOS_MAX:
+        return _error("demasiados_intentos", espera=_FALLOS_VENTANA)
+    try:
+        vista = veintiuno.unirse(did, str(datos.get("codigo", ""))[:8])
+    except JuegoError as e:
+        if e.codigo == "sala_no_existe":
+            _FALLOS.setdefault(did, []).append(time.time())
+        return _error(e.codigo, **e.datos)
+    return _con_saldo(vista, did)
 
 
-def _caducar_sala(p: dict, ahora: int) -> bool:
-    if p["estado"] == "espera" and ahora >= p["creada"] + SALA_ESPERA_SEG:
-        p["estado"] = "cancelada"
-        return True
-    return False
+@bp.get("/21/estado")
+def v21_estado():
+    did, fallo = _jugador(request.args)
+    if fallo:
+        return fallo
+    try:
+        vista = veintiuno.estado(did, str(request.args.get("codigo", ""))[:8])
+    except JuegoError as e:
+        return _error(e.codigo, **e.datos)
+    return _con_saldo(vista, did)
 
 
-def _barrer(c: sqlite3.Connection, ahora: int) -> int:
-    """Cierra salas sin rival vencidas y partidas abandonadas. Devuelve cuantas toco."""
-    n = 0
-    for (codigo,) in c.execute("SELECT codigo FROM v21_partidas WHERE estado IN ('espera', 'jugando')").fetchall():
-        p = _cargar(c, codigo)
-        if p is None or p["estado"] not in ACTIVAS:
-            continue
-        if _caducar_sala(p, ahora) or (p["estado"] == "jugando" and _resolver_tiempo(c, p, ahora)):
-            _guardar(c, p, ahora)
-            n += 1
-    return n
+@bp.post("/21/accion")
+def v21_accion():
+    datos = request.get_json(silent=True) or {}
+    did, fallo = _jugador(datos)
+    if fallo:
+        return fallo
+    try:
+        vista = veintiuno.accion(did, str(datos.get("codigo", ""))[:8], str(datos.get("accion", "")),
+                                 str(datos.get("comodin", ""))[:12] or None)
+    except JuegoError as e:
+        return _error(e.codigo, **e.datos)
+    return _con_saldo(vista, did)
 
 
-# ---------- lo que ve cada jugador ----------
-
-def _vista(p: dict, uid: int, ahora: int) -> dict:
-    """Estado de la partida visto por `uid`. NUNCA incluye la baraja ni la carta oculta del rival."""
-    rival = _otro(p, uid)
-    v = {
-        "codigo": p["codigo"], "estado": p["estado"], "apuesta": p["apuesta"],
-        "yo": str(uid), "rival": str(rival) if rival else None,
-    }
-    if p["estado"] in ("espera", "cancelada"):
-        if p["estado"] == "espera":
-            v["vence_en"] = max(0, p["creada"] + SALA_ESPERA_SEG - ahora)
-        return v
-
-    d = p["datos"]
-    mi, riv = d["manos"][str(uid)], d["manos"][str(rival)]
-    v.update({
-        "bote": 2 * p["apuesta"], "ronda": d["ronda"], "rondas": RONDAS, "victorias_para_ganar": VICTORIAS,
-        "victorias": {"yo": d["victorias"][str(uid)], "rival": d["victorias"][str(rival)]},
-        "mi_mano": list(mi), "mi_total": _total(mi),           # mi_mano[0] es MI carta boca abajo
-        "rival_mano": list(riv[1:]), "rival_visible": _total(riv[1:]),
-        "rival_tiene_oculta": True,                              # solo se sabe que existe
-        "objetivo": d.get("objetivo", OBJETIVO),
-        "mis_comodines": list(d.get("comodines", {}).get(str(uid), [])),
-        "rival_comodines": list(d.get("comodines", {}).get(str(rival), [])),   # el rival los ve, como en RE7
-        "mi_escudo": uid in d.get("escudo", []),
-        "espiando": riv[0] if uid in d.get("espia", []) else None,   # SOLO quien espio ve la carta oculta
-    })
-    ev = d.get("evento")
-    if ev:
-        v["evento"] = {"n": ev["n"], "quien": "yo" if ev["quien"] == uid else "rival", "c": ev["c"]}
-    ur = d.get("ultima_ronda")
-    if ur:
-        def quien(g):
-            return None if g is None else ("yo" if g == uid else "rival")
-        v["ultima_ronda"] = {
-            "ronda": ur["ronda"], "ganador": quien(ur["ganador"]), "motivo": ur["motivo"],
-            "mi_mano": ur["manos"][str(uid)], "rival_mano": ur["manos"][str(rival)],
-        }
-    if p["estado"] == "jugando":
-        mio = d["turno"] == uid
-        v.update({
-            "turno": "yo" if mio else "rival",
-            "turno_restante": max(0, d["turno_hasta"] - ahora),
-            "rival_planto": bool(d["ultimo_paso"] and mio),
-            "puedo_pedir": mio and bool(d["mazo"]),
-            "puedo_plantarme": mio,
-            "puedo_comodin": mio and not d.get("uso_turno", False),
-        })
-    else:
-        r = d["resultado"]
-        g = r["ganador"]
-        v["resultado"] = {
-            "ganador": "empate" if g is None else ("yo" if g == uid else "rival"),
-            "motivo": r["motivo"],
-            "delta": 0 if (g is None or r.get("vencida")) else (p["apuesta"] if g == uid else -p["apuesta"]),
-            "vencida": bool(r.get("vencida")),   # cruzo el lunes: no se pago nada
-        }
-    return v
+@bp.post("/21/cancelar")
+def v21_cancelar():
+    datos = request.get_json(silent=True) or {}
+    did, fallo = _jugador(datos)
+    if fallo:
+        return fallo
+    try:
+        vista = veintiuno.cancelar(did, str(datos.get("codigo", ""))[:8])
+    except JuegoError as e:
+        return _error(e.codigo, **e.datos)
+    return _con_saldo(vista, did)
 
 
-# ---------- API publica (la llama api.py) ----------
-
-def crear_sala(uid: int, apuesta: int) -> dict:
-    """Crea una sala en espera y devuelve su codigo. No se retira nada hasta que entre el rival."""
-    if not isinstance(apuesta, int) or isinstance(apuesta, bool) or apuesta < 1 \
-            or (APUESTA_MAX_21 and apuesta > APUESTA_MAX_21):
-        raise JuegoError("apuesta_invalida", maximo=APUESTA_MAX_21)
-    ahora = _ahora()
-    with limites.transaccion() as c:
-        _barrer(c, ahora)
-        ya = _activa_de(c, uid)
-        if ya:
-            raise JuegoError("ya_en_partida", sala=ya)
-        disp = limites._disponibles(c, uid)
-        if disp < apuesta:
-            raise JuegoError("saldo", disponibles=disp)
-        codigo = _codigo_nuevo(c)
-        c.execute(
-            "INSERT INTO v21_partidas (codigo, estado, creador, rival, apuesta, creada, actualizada, datos) "
-            "VALUES (?, 'espera', ?, NULL, ?, ?, ?, '{}')", (codigo, uid, apuesta, ahora, ahora),
-        )
-        return {"codigo": codigo, "apuesta": apuesta, "vence_en": SALA_ESPERA_SEG}
-
-
-def unirse(uid: int, codigo: str) -> dict:
-    """Entra a una sala por su codigo: retiene la apuesta a los dos y reparte la primera ronda."""
-    codigo = normalizar_codigo(codigo)
-    ahora = _ahora()
-    cancelada_por_saldo = False
-    with limites.transaccion() as c:
-        _barrer(c, ahora)
-        p = _cargar(c, codigo)
-        if p is None or p["estado"] == "cancelada":
-            raise JuegoError("sala_no_existe")
-        if p["estado"] != "espera":
-            raise JuegoError("sala_llena")
-        if p["creador"] == uid:
-            raise JuegoError("tu_sala")
-        ya = _activa_de(c, uid)
-        if ya:
-            raise JuegoError("ya_en_partida", sala=ya)
-        disp_rival = limites._disponibles(c, uid)
-        if disp_rival < p["apuesta"]:
-            raise JuegoError("saldo", disponibles=disp_rival, apuesta=p["apuesta"])
-        if limites._disponibles(c, p["creador"]) < p["apuesta"]:
-            # El creador gasto sus pedidos mientras esperaba: la sala ya no vale.
-            p["estado"] = "cancelada"
-            _guardar(c, p, ahora)
-            cancelada_por_saldo = True
-        else:
-            _aplicar(c, p["creador"], -p["apuesta"], "21", f"apuesta {codigo} vs {uid}")
-            _aplicar(c, uid, -p["apuesta"], "21", f"apuesta {codigo} vs {p['creador']}")
-            p["rival"] = uid
-            p["estado"] = "jugando"
-            p["datos"] = {
-                "ronda": 1, "semana": limites._semana(), "victorias": {str(p["creador"]): 0, str(uid): 0},
-                "faltas": {str(p["creador"]): 0, str(uid): 0}, "ultima_ronda": None, "resultado": None,
-            }
-            _repartir(p, secrets.choice([p["creador"], uid]), ahora)
-            _guardar(c, p, ahora)
-            return _vista(p, uid, ahora)
-    if cancelada_por_saldo:
-        raise JuegoError("sala_invalida")
-
-
-def estado(uid: int, codigo: str) -> dict:
-    """Estado actual para `uid`. Solo abre transaccion de escritura si hay un plazo que resolver."""
-    codigo = normalizar_codigo(codigo)
-    ahora = _ahora()
-    with closing(limites._conectar()) as c:
-        p = _cargar(c, codigo)
-    if p is None:
-        raise JuegoError("sala_no_existe")
-    if uid not in (p["creador"], p["rival"]):
-        raise JuegoError("no_participas")
-
-    d = p["datos"]
-    vencida = (p["estado"] == "espera" and ahora >= p["creada"] + SALA_ESPERA_SEG) or \
-              (p["estado"] == "jugando" and ahora >= d["turno_hasta"])
-    if not vencida:
-        return _vista(p, uid, ahora)
-
-    with limites.transaccion() as c:
-        p = _cargar(c, codigo)
-        if _caducar_sala(p, ahora) or (p["estado"] == "jugando" and _resolver_tiempo(c, p, ahora)):
-            _guardar(c, p, ahora)
-        return _vista(p, uid, ahora)
-
-
-def accion(uid: int, codigo: str, que: str, comodin: str | None = None) -> dict:
-    """'pedir', 'plantarse', 'abandonar' o 'comodin' (con el nombre en `comodin`).
-    Si el plazo ya vencio, primero se resuelve el plazo."""
-    codigo = normalizar_codigo(codigo)
-    if que not in ("pedir", "plantarse", "abandonar", "comodin") or (que == "comodin" and comodin not in COMODINES):
-        raise JuegoError("accion")
-    ahora = _ahora()
-    with limites.transaccion() as c:
-        p = _cargar(c, codigo)
-        if p is None:
-            raise JuegoError("sala_no_existe")
-        if uid not in (p["creador"], p["rival"]):
-            raise JuegoError("no_participas")
-        if p["estado"] != "jugando":
-            return _vista(p, uid, ahora)
-        _resolver_tiempo(c, p, ahora)
-        if p["estado"] == "jugando":
-            if que == "abandonar":
-                _terminar(c, p, _otro(p, uid), "abandono")
-            elif que == "comodin":
-                _usar_comodin(c, p, uid, comodin, ahora)
-            else:
-                _ejecutar(c, p, uid, que, ahora)
-        _guardar(c, p, ahora)
-        return _vista(p, uid, ahora)
-
-
-def cancelar(uid: int, codigo: str) -> dict:
-    """El creador cierra su sala mientras nadie ha entrado."""
-    codigo = normalizar_codigo(codigo)
-    ahora = _ahora()
-    with limites.transaccion() as c:
-        p = _cargar(c, codigo)
-        if p is None:
-            raise JuegoError("sala_no_existe")
-        if p["creador"] != uid:
-            raise JuegoError("no_participas")
-        if p["estado"] != "espera":
-            raise JuegoError("sala_llena")
-        p["estado"] = "cancelada"
-        _guardar(c, p, ahora)
-        return _vista(p, uid, ahora)
-
-
-def sala_actual(uid: int) -> str | None:
-    """Codigo de la partida/sala activa de la persona (para retomarla al recargar la web)."""
-    ahora = _ahora()
-    with limites.transaccion() as c:
-        _barrer(c, ahora)
-        return _activa_de(c, uid)
-
-
-def barrer() -> int:
-    """Para una tarea periodica del bot (por ejemplo cada minuto). Opcional: todo se resuelve igual al consultar."""
-    with limites.transaccion() as c:
-        return _barrer(c, _ahora())
+@bp.get("/21/actual")
+def v21_actual():
+    """Codigo de la sala/partida activa de la persona (None si no tiene), para retomarla al recargar."""
+    did, fallo = _jugador(request.args)
+    if fallo:
+        return fallo
+    return jsonify({"ok": True, "codigo": veintiuno.sala_actual(did)})
